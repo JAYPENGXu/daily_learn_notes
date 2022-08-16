@@ -1,0 +1,2 @@
+140.82.113.3 github.com
+注释：当需要将本地内容推送到github仓库时，将上句语句添加到 C:\Windows\System32\drivers\etc中的host文件的最后一行即可，不用时将该语句删除，（因为不确定会造成什么影响）。
