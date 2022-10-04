@@ -173,17 +173,101 @@ int *const p1 = &i; //不能改变p1的值，这是一个顶层const
 const int *p2 = &ci; //允许改变p2的值，这是一个底层const
 ```
 
-函数重载：同一作用域内的几个函数名字相同但形参列表不同。
+函数重载：同一作用域内的几个函数名字相同但形参列表不同。对于重载函数，他们应该在形参数量或形参类型上有所不同，不允许两个函数除了返回类型外其他所有的要素都相同。
 
-`const_cast`在重载函数的情境下最有用，
+`const_cast`在重载函数的情境下最有用。
 
 
 
 右值引用：绑定到右值的引用，`&&` ，重要性质：只能绑定倒一个将要销毁的对象。
 
-左值表达式表示的是一个对象的身份，右值表达式表示的是对象的值。
+<u>左值表达式表示的是一个对象的身份</u>，<u>右值表达式表示的是对象的值</u>。左值与右值的根本区别在于是否允许取地址运算符获得对应的内存地址。
 
-`字面常量是右值`
+* 左值转化为右值，如整数变量`i`,在表达式（`i+3`）
+* 数组名是常量左值，在表达式中转化为数组首元素的地址值
+* 函数名是常量左值，在表达式中转化为函数的地址名
+
+`字面常量是右值：1、2、88`
+
+C++11引用绑定规则
+
+* 非常量左值引用(X&):只能绑定到X类型的左值对象
+* 常量左值引用（const X&）：可以绑定到X、const X类型的左值对象，或X、const X类型的右值。
+* 非常量右值引用（X&&）：只能绑定到X类型的右值
+* 常量右值引用（const X&&）：可以绑定到X、const X类型的右值
+
+函数返回值是右值数据类型还是右值引用类型，区别在于前者是传值，而后者是传引用，可以修改被引用的对象：
+
+```c++
+#include <iostream>
+#include <utility>
+
+int i = 101, j = 101;
+
+int foo(){ return i; }
+int&& bar(){ return std::move(i); }
+void set(int&& k){ k = 102; }
+int main()
+{
+	foo();
+	std::cout << i << std::endl;
+	set(bar());
+	std::cout << i << std::endl; 	 
+}
+out: 101、 102
+```
+
+完美转发：
+
+~~这种实现的问题是不能支持移动语义，形参使用右值引用可以解决完美转发问题。~~
+
+```c++
+#include <iostream>
+#include <utility>
+#include <memory>
+
+using namespace std;
+
+template <typename T, typename Arg>
+shared_ptr<T> factory(const Arg& arg)
+{
+    return shared_ptr<T> (new T(arg));
+}
+
+int main()
+{
+    auto x = factory<int>(22);
+    cout << *x; 
+}
+out : 22
+```
+
+完美转发解决方案：其中`std::forward`是定义在c++11标准库中的模板函数
+
+```c++
+template <typename T, typename Arg> 
+shared_ptr<T> factory(Arg&& arg)
+{
+    return shared_ptr<T>( new T(std::forward<Arg>(arg) ) );
+}
+```
+
+模板参数类型推导：对函数模板 `template<typename T>void foo(T&&);`可推导出如下结论：
+
+* 如果实参是类型A的左值，则模板参数T的类型为A&， 形参类型为A&；
+* 如果实参是类型A的右值，则模板参数T的类型为A&&, 形参类型为A&&;
+
+这同样适用于类模板的成员函数模板的类型推导：
+
+```c++
+template <class T> class vector{
+    public:
+    void push_back(T&& x); //T是类模板参数，该成员函数不需要类型推导，这里的函数参数类型就是T的右值引用
+    template <class Args> void emplace_back(Args&& args);//该成员函数是个函数模板，有自己的模板参数，需要类型推导
+}
+```
+
+---
 
 `mutex`，lock_guard与mutex配合使用，把锁放到`lock_guard`中时，mutex自动上锁，lock_guard析构时，同时把mutex解锁，*lock_guard is an object that manages a mutex object by keeping it always locked* 。
 
@@ -239,4 +323,21 @@ shared_ptr<int> p3 = make_shared<int> (42); //指向一个值为42的int的share
 
 shared_ptr<string> p4 = make_shared<string> (10, '9'); //指向一个值为9999999999的string
 ```
+
+迭代器：所有标准库容器都可以使用迭代器，string对象不属于容器类型，string支持迭代器。`begin`、`end`，end指向尾元素的下一个位置，如果容器为空，则begin和end返回的是同一个迭代器，都是尾后迭代器。begin和end返回的举体类型由对象是否为常量决定，如果对象为常量，则返回`const_iterator`;如果对象不是常量，返回`iterator`。
+
+```c++
+vector<int>::iterator it; //it能读写vector<int>的元素
+string:: iterator it2; //it2能读写string对象中的元素
+vector<int>::const iterator it3; //it3只能读元素，不能写元素
+string::const iterator it4; //it4只能读元素，不能写元素
+```
+
+`->`：解引用和成员访问两个操作结合在一起。
+
+如果只是读取元素，而不存在写操作，使用`cbegin`、`cend`来控制整个迭代过程。
+
+函数模板，`template <typename T>`
+
+
 
