@@ -94,7 +94,6 @@ vector<vector<int>> a(rol, vector<int>(col)); //二维数组 rol行 col列
 priority_queue<int> a; //默认大根堆
 priority_queue<int, vector<int>, greater<int>> b; //小根堆
 
-
 struct Rec{
     int a, b;
     
@@ -324,6 +323,38 @@ shared_ptr<int> p3 = make_shared<int> (42); //指向一个值为42的int的share
 shared_ptr<string> p4 = make_shared<string> (10, '9'); //指向一个值为9999999999的string
 ```
 
+---
+
+```c++
+void bar(std::unique_ptr<Entity> e){
+    // bar owns e.
+    // e will be automatically destroyed.
+}
+var foo(){
+    auto e = std::make_unique<Entity>();
+    e->DoSomething();
+    bar(std::move(e));
+}
+foo();
+//No memory leak.
+```
+
+<img src="G:\typora_image_store\image-20221005205311643.png" alt="image-20221005205311643" style="zoom:53%;" />
+
+<img src="G:\typora_image_store\image-20221005205742340.png" alt="image-20221005205742340" style="zoom:50%;" />
+
+<img src="G:\typora_image_store\image-20221005205959069.png" alt="image-20221005205959069" style="zoom:50%;" />
+
+
+
+<img src="G:\typora_image_store\image-20221005210055013.png" alt="image-20221005210055013" style="zoom:53%;" />
+
+虚函数：必须为每一个虚函数都提供定义，而不管它是否被用到了，这是因为连编译器也无法确定到底会使用哪个虚函数。动态绑定只有当我们通过指针或者引用调用虚函数时才会发生。在c++11中我们可以使用`override`关键字来说明派生类中的虚函数。
+
+函数重载：如果同一作用域内的几个函数名字相同，但形参列表不同，我们称之为重载函数（`overloaded`）。
+
+`explicit`关键字：用来修饰类的构造函数，被修饰的构造函数的类，不能发生相应的隐式类型转换，只能以显示的方式进行类型转换。只能作用域类内部的构造函数声明上。
+
 迭代器：所有标准库容器都可以使用迭代器，string对象不属于容器类型，string支持迭代器。`begin`、`end`，end指向尾元素的下一个位置，如果容器为空，则begin和end返回的是同一个迭代器，都是尾后迭代器。begin和end返回的举体类型由对象是否为常量决定，如果对象为常量，则返回`const_iterator`;如果对象不是常量，返回`iterator`。
 
 ```c++
@@ -339,5 +370,34 @@ string::const iterator it4; //it4只能读元素，不能写元素
 
 函数模板，`template <typename T>`
 
+拷贝控制操作：
 
+一个类通过定义五种特殊的成员函数来控制这些操作，包括：**拷贝构造函数**、**拷贝赋值函数**、**移动构造函数**、**移动赋值函数**、**析构函数**，
+
+* 拷贝和移动构造函数定义了当用同类型的额另一个对象初始化本对象时做什么。
+
+* 拷贝和移动赋值运算符定义了将一个对象赋予同类型的另一个对象时做什么。
+
+* 析构函数定义了当此类型对象销毁时做什么。
+
+拷贝构造函数：如果一个构造函数的<u>第一个参数是自身类类型的引用</u>，且任何额外参数都有默认值，则此构造函数是拷贝构造函数。
+
+```c++
+class Foo{
+    public:
+    	Foo();  //默认构造函数
+    	Foo(const Foo&); //拷贝构造函数
+}
+```
+
+使用`=default`：我们可以通过将拷贝控制成员定义为=default来显示的要求编译器生成合成的版本
+
+```c++
+class Sales_data{
+    public:
+    	Sales_data() = default;
+    	Sales_data(const Sales_data) = default;
+    	~Sales_data() = default;
+}
+```
 
