@@ -131,12 +131,29 @@ a.erase(unique(a.begin(), a.end()), a.end())// 删除重复元素
 
 //打乱
 random_shuffle(a.begin(), a.end());
-
 ```
 
 ---
 
 #### 《C++ primer》内容总结
+
+`lambda`表达式形式：
+
+`[capture list] (parameter list) -> return type {function body}`
+
+capture list通常为空
+
+不带参数: 
+
+`auto f = [] {return 42;}`
+
+带参数:
+
+```c++
+[] (const string &a, const string &b) {return a.size() < b.size()}
+```
+
+constexpr变量：c++11允许将变量声明为constexpr类型以便由编译器来验证变量的值是否是一个常量表达式。
 
 把`引用`绑定到`const`对象上称之为对常量的引用，不能被用作修改它所绑定的对象。
 
@@ -401,3 +418,85 @@ class Sales_data{
 }
 ```
 
+线程：c++11提供的线程类 `std::thread`
+
+命名空间 `std::this_pthread`,此命名空间提供四个公共的成员函数，
+
+`get_id()`
+
+```c++
+thread::id get_id() noexcept;
+```
+
+`sleep_for()` ：线程会从运行态变成阻塞态并在这种状态下休眠一定的时长
+
+线程被创建出来有五种状态：创建态、就绪态、阻塞态、运行态、退出态；
+
+```c++
+template <class Rep, class Period>
+    void sleep_for(const chrono::duration<Rep, Period>&rel_time);
+```
+
+`sleep_until`:指定线程阻塞到某一时间点**time_point类型**，之后解除
+
+```c++
+template <class Clock, class Duration>
+    void sleep_until(const chrono::time_point<Clock, Duration>& abs_time);
+```
+
+`yield()` 线程使用了yield之后会放弃CPU资源，但是这个变为就绪态的线程会马上参与到下一轮CPU资源的争夺中，不排除其会继续抢到CPU时间片的情况
+
+```c++
+void yield() noexcept;
+```
+
+C++线程类：
+
+默认构造函数、移动构造函数、创建线程构造对象；
+
+```c++
+thread() noexcept; //默认构造,在此线程中不执行任何处理动作
+thread(thread && other) noexcept; //移动构造,将 other的线程所有权转移给新的thread对象，之后other不在便是执行线程
+template<class Function, class ..Args> //创建线程对象
+explicit thread (Function&& f, Args&& ..args);
+```
+
+`get_id()` 获取线程ID的函数，
+
+当启动一个线程后，回收线程资源，thread库提供两种方式：
+
+`join()` ：调用此函数的线程会被阻塞，但是子线程对象中的任务函数会继续执行。当任务执行完毕之后join()函数会清理当前子线程中的相关资源后返回，同时该线程函数会解除阻塞继续执行。
+
+`detach()` ：进行线程分离，分离主线程和子线程。在线程分离之后，主线程退出也会销毁创建的所有子线程，在主线程推出之前，子线程可以脱离主线程继续独立运行，任务结束完毕之后，这个子线程会自动释放自己占用的系统资源。
+
+fork系统调用： `man fork`
+
+在父进程中返回的是子进程的pid，在子进程中返回0。
+
+`wait`函数将阻塞进程，直到该进程中的某个子进程结束运行为止，它返回结束运行的子进程的pid。
+
+`waitpid`只等待由pid参数指定的子进程，如果pid取值为-1，那么它和wait函数相同，即等待任意一个子进程结束。
+
+线程同步方式：信号量、互斥锁、条件变量；
+
+`pthread_create()`:创建线程,成功返回0。
+
+`pthread_exit()`:确保安全干净的退出。
+
+`pthread_join()`:回收其他线程，即等待其他线程结束。
+
+`pthread_cancel()`:取消线程。
+
+互斥锁：互斥锁的类型是pthread_mutex_t结构体；
+
+`pthread_mutex_init()`:初始化互斥锁
+
+`pthread_mutex_destory()`:销毁互斥锁
+
+`pthread_mutex_lock()`:以原子操作的方式给一个互斥量加锁
+
+`pthread_mutex_trylock()`:始终立即返回，不论被操作对象的互斥锁是否已经被加锁，相当于非阻带版本。
+
+`pthread_mutex_unlock()`:以原子操作的方式给一个互斥锁解锁
+
+以上五个函数，成功返回0。

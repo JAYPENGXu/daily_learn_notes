@@ -132,6 +132,8 @@ ag 'thrift'
 
 `gcc -g main.c -o main` 编译main.c文件 -g保留调试信息
 
+`g++ thread.cpp -lpthread -o thread` 编译c++文件， thread不是linux标准库
+
 `gdb: file filename -> start -> s` 
 
 `layout src` 
