@@ -128,6 +128,12 @@ ag 'thrift'
 
 `^E` *means* `ctrl+E`
 
+`alias`：可以为命令设置别名
+
+`alias matlab="/usr/local/Polyspace/R2021a/bin/matlab"`
+
+`source ~/.bashrc`
+
 `gcc main.c -o main` 编译main.c文件
 
 `gcc -g main.c -o main` 编译main.c文件 -g保留调试信息
@@ -164,3 +170,30 @@ ag 'thrift'
 `./ a.out &` ：使可执行文件后台运行
 
 `gdb -p pid` :通过正在运行的程序的pid，调试该程序
+
+makefile用法：
+
+```makefile
+cc = gcc
+main: main.c tool.o
+	$(cc) main.c tool.o -o main
+tool.o: tool.c
+	gcc -c tool.c
+clean:
+	rm *.o main
+```
+
+多个函数生成一个含main的可执行文件:
+
+```makefile
+CC = gcc
+main: main.c bar.o foo.o
+	$(CC) main.c bar.o foo.o -o main
+bar.o: bar.c 
+	gcc -c bar.c 
+foo.o: foo.c 
+	gcc -c foo.c 
+clean:
+	rm *.o main
+```
+

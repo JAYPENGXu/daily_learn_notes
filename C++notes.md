@@ -481,11 +481,27 @@ fork系统调用： `man fork`
 
 `pthread_create()`:创建线程,成功返回0。
 
+```c++
+int pthread_create(pthread_t *tidp, const pthread_attr_t *attr, (void *)(*start_rtn)(void *), void *args);
+```
+
 `pthread_exit()`:确保安全干净的退出。
+
+```c++
+void pthread_exit(void *retval);
+```
 
 `pthread_join()`:回收其他线程，即等待其他线程结束。
 
+```c++
+int pthread_join(pthread_t thread, void **retval);
+```
+
 `pthread_cancel()`:取消线程。
+
+```c++
+int pthread_cancel(pthread_t thread);
+```
 
 互斥锁：互斥锁的类型是pthread_mutex_t结构体；
 
@@ -500,3 +516,63 @@ fork系统调用： `man fork`
 `pthread_mutex_unlock()`:以原子操作的方式给一个互斥锁解锁
 
 以上五个函数，成功返回0。
+
+```c
+//c代码      <---> c++代码
+pthread_self() = getpid()
+pthread_create() = fork()
+pthread_cancel() = kill()
+pthread_join() = wait()
+pthread_exit()
+pthread_detach()
+pthread_equal()
+```
+
+C中的`typeof`关键字：
+
+```c
+extern int foo();
+typeof(foo()) var;  //声明了一个整型的变量var
+typeof(int *) a, b; //等价于 int *a, int *b;
+```
+
+`__thread`是GCC内置的用于多线程编程的基础设施，用`__thread`修饰的变量，每个线程都拥有一份实体，相互独立。
+
+```c
+#include<iostream>  
+#include<pthread.h>  
+#include<unistd.h>  
+using namespace std;
+__thread int i = 1;
+void* thread1(void* arg);
+void* thread2(void* arg);
+int main()
+{
+  pthread_t pthread1;
+  pthread_t pthread2;
+  pthread_create(&pthread1, NULL, thread1, NULL);
+  pthread_create(&pthread2, NULL, thread2, NULL);
+  pthread_join(pthread1, NULL);
+  pthread_join(pthread2, NULL);
+  return 0;
+}
+void* thread1(void* arg)
+{
+  cout<<++i<<endl;//输出 2  
+  return NULL;
+}
+void* thread2(void* arg)
+{
+  sleep(1); //等待thread1完成更新
+  cout<<++i<<endl;//输出 2，而不是3
+  return NULL;
+}
+```
+
+`memory barrier`：防止乱序执行，包括三种；编译器只需保证单线程内的一致性即可，中间过程的任意优化是允许的。
+
+1. `acquire barrier`。 其之后的指令不能也不会被拉到该acquire barrier之前执行，对应 lock()。
+2. `release barrier`。其之前的指令不能也不会被拉到该release barrier之后执行，对应unlock()。
+3. `full barrier`。以上两种的合集。
+
+`__sync_synchronize`:一种full barrier。
