@@ -153,7 +153,7 @@ capture list通常为空
 [] (const string &a, const string &b) {return a.size() < b.size()}
 ```
 
-constexpr变量：c++11允许将变量声明为constexpr类型以便由编译器来验证变量的值是否是一个常量表达式。
+`constexpr`变量：c++11允许将变量声明为`constexpr`类型以便由编译器来验证变量的值是否是一个常量表达式。
 
 把`引用`绑定到`const`对象上称之为对常量的引用，不能被用作修改它所绑定的对象。
 
@@ -192,8 +192,6 @@ const int *p2 = &ci; //允许改变p2的值，这是一个底层const
 函数重载：同一作用域内的几个函数名字相同但形参列表不同。对于重载函数，他们应该在形参数量或形参类型上有所不同，不允许两个函数除了返回类型外其他所有的要素都相同。
 
 `const_cast`在重载函数的情境下最有用。
-
-
 
 右值引用：绑定到右值的引用，`&&` ，重要性质：只能绑定倒一个将要销毁的对象。
 
@@ -418,6 +416,8 @@ class Sales_data{
 }
 ```
 
+`volatile`关键字：遇到这个关键字声明的变量，编译器访问该变量的代码就不再进行优化，即编译器生成的汇编代码会重新从变量的地址读取数据，从而实现提供对特殊地址的稳定访问。[参考链接](https://www.runoob.com/w3cnote/c-volatile-keyword.html)
+
 线程：c++11提供的线程类 `std::thread`
 
 命名空间 `std::this_pthread`,此命名空间提供四个公共的成员函数，
@@ -482,25 +482,48 @@ fork系统调用： `man fork`
 `pthread_create()`:创建线程,成功返回0。
 
 ```c++
-int pthread_create(pthread_t *tidp, const pthread_attr_t *attr, (void *)(*start_rtn)(void *), void *args);
+int pthread_create(pthread_t *tidp, const pthread_attr_t *attr, (void *)(*start_rtn)(void *), void *args); //pthread是一个整型，attr用于设置新线程的属性，start_rtn指定新线程将运行的函数，arg函数的参数。
 ```
 
 `pthread_exit()`:确保安全干净的退出。
 
 ```c++
-void pthread_exit(void *retval);
+void pthread_exit(void *retval); //通过retrval参数向线程的回收者传递其退出信息。
 ```
 
-`pthread_join()`:回收其他线程，即等待其他线程结束。
+`pthread_join()`:回收其他线程，即等待其他线程结束，成功返回0.
 
 ```c++
-int pthread_join(pthread_t thread, void **retval);
+int pthread_join(pthread_t thread, void **retval); //等待其他线程结束，该函数会一直阻塞，直到被回收的线程结束为止。
 ```
 
-`pthread_cancel()`:取消线程。
+`pthread_cancel()`:取消线程， 成功返回0。
 
 ```c++
-int pthread_cancel(pthread_t thread);
+int pthread_cancel(pthread_t thread);//thread参数是目标线程的标识符。
+```
+
+线程属性：`pthread_attr_t`结构体定义了一套完整的线程属性；
+
+```c++
+#define __SIZEOF_PTHREAD_ATTR_T 36
+typedef union{
+    char __size[__SIZEOF_PTHREAD_ATTR_T];
+    long int __align;
+}pthread_attr_t;
+```
+
+POSIX信号量：线程同步的机制：POSIX信号量、互斥量、条件变量
+
+POSIX信号量函数名字以**sem_**开头，常用的POSIX信号量函数如下5个：
+
+```c++
+#include <semaphore.h>
+int sem_init(sem_t *sem, int pshared, unsigned int value); //初始化一个未命名的信号量
+int sem_destroy(sem_t *sem);//销毁信号量，释放其占用的内核资源
+int sem_wait(sem_t *sem); //以原子操作的方式将信号量的值减1，如果信号量的值为0，则该函数被阻塞
+int sem_trywait(sem_t *sem);//与wait相似，始终立即返回。
+int sem_post(sem_t *sem); //以原子操作的方式将信号量的值加1
 ```
 
 互斥锁：互斥锁的类型是pthread_mutex_t结构体；
@@ -516,6 +539,22 @@ int pthread_cancel(pthread_t thread);
 `pthread_mutex_unlock()`:以原子操作的方式给一个互斥锁解锁
 
 以上五个函数，成功返回0。
+
+互斥锁属性：`pthread_mutexattr_t`结构体定义了互斥锁属性，线程库中提供了一系列函数来操作pthread_mutexattr_t类型的变量，主要函数包括以下：
+
+```c++
+#include <pthread.h>
+int pthread_mutexattr_init(pthread_mutexattr_t *attr);
+int pthread_mutexattr_destroy(pthread_mutexattr_t *attr);
+int pthread_mutexattr_getpshared(const pthread_mutexattr_t *attr, int *pshared);
+int pthread_mutexattr_setpshared(pthread_mutexattr_t *attr,int pshared);
+int pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *type);
+int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type);
+```
+
+pshared指定是否允许跨进程共享互斥锁，其取值包含`PTHREAD_PROCESS_SHARED`(互斥锁可以被跨进程共享), `PTHREAD_PROCESS_PRIVATE`(互斥锁只能被和锁的初始化线程隶属于同一个进程的线程共享)。
+
+
 
 ```c
 //c代码      <---> c++代码
