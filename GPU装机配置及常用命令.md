@@ -187,3 +187,44 @@ $ `select host,user from user;`
 $ `ALTER USER 'root'@'%' IDENTIFIED WITH mysql_native_password BY '123456';`
 
 $ `flush privileges;`
+
+使用 MySQL Workbench连接运行在服务器docker中的数据库
+
+Anaconda环境管理：
+
+`conda create -n py36 python=3.6`
+
+`conda create -n tf tensorflow`
+
+`conda remove -n py36 --all`
+
+`conda deactivate`
+
+windows通过WSL创建虚拟linux环境，通过vscode登录虚拟环境
+
+首先linux端需要开启ssh服务
+
+`sudo service ssh start`
+
+之后通过如下命令查看是否开启
+
+`ps -e | grep ssh`
+
+**常用shell命令**
+
+`echo hello > hello.txt`
+
+`cat< hello.txt  > hello2.txt`
+
+`cat < hello.txt >> hello2.txt`
+
+`tail -n5`
+
+`ls -l / | tail -n4`
+
+`ls -l / | tail -n4 > ls.md`
+
+`curl --head --silent google.com | grep -i content-Type`
+
+`tee` 用于从标准输入读入数据，并将其内容输出成文件
+

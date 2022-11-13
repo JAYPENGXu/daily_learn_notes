@@ -285,6 +285,12 @@ template <class T> class vector{
 
 `mutex`，lock_guard与mutex配合使用，把锁放到`lock_guard`中时，mutex自动上锁，lock_guard析构时，同时把mutex解锁，*lock_guard is an object that manages a mutex object by keeping it always locked* 。
 
+`std::mutex`
+
+用于保护共享数据不被多个线程同时访问
+
+成员函数： `lock(), unlock(), trylock(),`
+
 ```c++
 std::mutex //该类表示普通的互斥锁，不能递归使用
 std:: timed_mutex //该类表示定时互斥锁，不能递归使用
@@ -321,7 +327,9 @@ int main(){
 }
 ```
 
+`std::lock_guard`
 
+是一个mutex包装器，用于在作用域块的持续时间内拥有metex，当一个lock_gurad对象被创建时，它会尝试获取给它的互斥锁的所有权，当控制权离开创建lock_guard对象的范围时，lock_guard被销毁，同时mutex被释放。
 
 动态内存的管理通过一对运算符来完成：`new`、`delete`，动态内存的使用易出问题，因为确保在正确的时间释放内存是极其困难的，容易造成内存泄漏。`智能指针`：行为类似常规指针，重要的区别在于它负责自动释放所指向的对象，`shared_ptr`允许多个指针指向同一个对象，`unique_ptr`则独占所指向的对象，`weak_ptrs`是一种弱引用，指向`shared_ptr`所管理的对象。
 
@@ -419,6 +427,12 @@ class Sales_data{
 `volatile`关键字：遇到这个关键字声明的变量，编译器访问该变量的代码就不再进行优化，即编译器生成的汇编代码会重新从变量的地址读取数据，从而实现提供对特殊地址的稳定访问。[参考链接](https://www.runoob.com/w3cnote/c-volatile-keyword.html)
 
 线程：c++11提供的线程类 `std::thread`
+
+`std::thread t1(fun(), id);`
+
+线程允许多个函数同时执行
+
+成员函数：`joinable(), get_id(), native_handle()`,|| `join(), detach(), swap();`
 
 命名空间 `std::this_pthread`,此命名空间提供四个公共的成员函数，
 
