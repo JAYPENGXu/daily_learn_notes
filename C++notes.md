@@ -289,6 +289,37 @@ template <class T> class vector{
 
 用于保护共享数据不被多个线程同时访问
 
+```c++
+#include <iostream>
+#include <chrono>
+#include <thread>
+#include <mutex>
+ 
+int g_num = 0;  // protected by g_num_mutex
+std::mutex g_num_mutex;
+ 
+void slow_increment(int id) 
+{
+    for (int i = 0; i < 3; ++i) {
+        g_num_mutex.lock();   //上锁
+        ++g_num;
+        // note, that the mutex also syncronizes the output
+        std::cout << "id: " << id << ", g_num: " << g_num << '\n';
+        g_num_mutex.unlock();  //解锁
+ 
+        std::this_thread::sleep_for(std::chrono::milliseconds(234));
+    }
+}
+ 
+int main()
+{
+    std::thread t1{slow_increment, 0};
+    std::thread t2{slow_increment, 1};
+    t1.join();
+    t2.join();
+}
+```
+
 成员函数： `lock(), unlock(), trylock(),`
 
 ```c++
@@ -324,6 +355,63 @@ int main(){
     }
     for(auto &th : threads) th.join();
     return 0;
+}
+```
+
+try_lock():
+
+```c++
+#include <chrono>
+#include <mutex>
+#include <thread>
+#include <iostream> // std::cout
+ 
+std::chrono::milliseconds interval(100);
+ 
+std::mutex mutex;
+int job_shared = 0; // both threads can modify 'job_shared',
+    // mutex will protect this variable
+ 
+int job_exclusive = 0; // only one thread can modify 'job_exclusive'
+    // no protection needed
+ 
+// this thread can modify both 'job_shared' and 'job_exclusive'
+void job_1() 
+{
+    std::this_thread::sleep_for(interval); // let 'job_2' take a lock
+ 
+    while (true) {
+        // try to lock mutex to modify 'job_shared'
+        if (mutex.try_lock()) {
+            std::cout << "job shared (" << job_shared << ")\n";
+            mutex.unlock();
+            return;
+        } else {
+            // can't get lock to modify 'job_shared'
+            // but there is some other work to do
+            ++job_exclusive;
+            std::cout << "job exclusive (" << job_exclusive << ")\n";
+            std::this_thread::sleep_for(interval);
+        }
+    }
+}
+ 
+// this thread can modify only 'job_shared'
+void job_2() 
+{
+    mutex.lock();
+    std::this_thread::sleep_for(5 * interval);
+    ++job_shared;
+    mutex.unlock();
+}
+ 
+int main() 
+{
+    std::thread thread_1(job_1);
+    std::thread thread_2(job_2);
+ 
+    thread_1.join();
+    thread_2.join();
 }
 ```
 
@@ -464,7 +552,9 @@ template <class Clock, class Duration>
 void yield() noexcept;
 ```
 
-C++线程类：
+C++线程类：std::thread:
+
+线程允许多个函数同时执行，线程在构造相关线程对象后立即开始执行；
 
 默认构造函数、移动构造函数、创建线程构造对象；
 
@@ -481,7 +571,68 @@ explicit thread (Function&& f, Args&& ..args);
 
 `join()` ：调用此函数的线程会被阻塞，但是子线程对象中的任务函数会继续执行。当任务执行完毕之后join()函数会清理当前子线程中的相关资源后返回，同时该线程函数会解除阻塞继续执行。
 
-`detach()` ：进行线程分离，分离主线程和子线程。在线程分离之后，主线程退出也会销毁创建的所有子线程，在主线程推出之前，子线程可以脱离主线程继续独立运行，任务结束完毕之后，这个子线程会自动释放自己占用的系统资源。
+```c++
+#include <iostream>
+#include <thread>
+#include <chrono>
+ 
+void foo()
+{
+    // simulate expensive operation
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+}
+ 
+void bar()
+{
+    // simulate expensive operation
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+}
+ 
+int main()
+{
+    std::cout << "starting first helper...\n";
+    std::thread helper1(foo);
+ 
+    std::cout << "starting second helper...\n";
+    std::thread helper2(bar);
+ 
+    std::cout << "waiting for helpers to finish..." << std::endl;
+    helper1.join();
+    helper2.join();
+ 
+    std::cout << "done!\n";
+}
+```
+
+`detach()` ：进行线程分离，分离主线程和子线程。在线程分离之后，主线程退出也会销毁创建的所有子线程，在主线程退出之前，子线程可以脱离主线程继续独立运行，任务结束完毕之后，这个子线程会自动释放自己占用的系统资源。
+
+```c++
+#include <iostream>
+#include <chrono>
+#include <thread>
+ 
+void independentThread() 
+{
+    std::cout << "Starting concurrent thread.\n";
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    std::cout << "Exiting concurrent thread.\n";
+}
+ 
+void threadCaller() 
+{
+    std::cout << "Starting thread caller.\n";
+    std::thread t(independentThread);
+    t.detach();  //
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    std::cout << "Exiting thread caller.\n";
+}
+ 
+int main() 
+{
+    threadCaller();
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+}
+```
 
 fork系统调用： `man fork`
 
@@ -629,3 +780,61 @@ void* thread2(void* arg)
 3. `full barrier`。以上两种的合集。
 
 `__sync_synchronize`:一种full barrier。
+
+创建socket:
+
+```c++
+#include <sys/types.h>
+#include <sys/socket.h>
+int socket(int domain, int type, int protocol);
+```
+
+domain：使用哪个地城协议族；type指定服务类型，主要有SOCK_STREAM(流服务) 和SOCK_UGRAM（数据报）服务。对TCP/IP协议族而言，取SOCK_STREAM表示传输层使用TCP协议，取SOCK_UGRAM表示传输层使用UDP协议。
+
+protocol表示在前两个参数构成的协集合下，再选择一个具体的协议。通常设置为0。
+
+socket系统调用成功返回一个socker文件描述符，失败返回-1，并设置errno。
+
+将一个socket与socket地址绑定称为给socket命名。只有命名后客户端才能知道该如何连接它。客户端通常不需要命名，而是采用匿名方式，命名socket的系统调用是bind（）：
+
+```c++
+#include <sys/types.h>
+#include <sys/socket.h>
+int bind(int sockfd, const struct scokaddr *myaddr, socklen_t addrlen);
+```
+
+bind将my_addr所指向的socket地址分配给未命名的sockfd文件描述符，addrlen值除该socket地址的长度。
+
+socket被命名之后，还需要创建一个监听队列以存放待处理的客户连接：
+
+```c++
+#include <sys/socket.h>
+int listen(int sockfd, int backlog);
+```
+
+sockfd指定被监听的socket， backlog提示内核监听队列的最大长度。
+
+**Linux下实现IO复用：select poll epoll**
+
+select系统调用：在一段指定时间内，监听用户感兴趣的文件描述符上的可读、可写和异常等事件。
+
+```c++
+#include <sys/select.h>
+int select (int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout);
+```
+
+poll系统调用：在指定时间内轮询一定数量的文件描述符，以测试其中是否有就绪者。
+
+```c++
+#include <sys/poll.h>
+int poll (struct pollfd *fds, nfds_t nfds, int timeout);
+```
+
+epoll是linux特有的IO复用函数，其使用一组函数来完成任务，而不是单个函数，其次，epoll把用户关心的文件描述符上的事件放在内核里的一个事件表中，从而无需像select和poll那样每次调用都要重复传入文件描述符或事件集。但epoll需要使用一个额外的文件描述符，来唯一标识内核中的这个事件表。这个文件描述符使用如下epoll_create函数来创建：
+
+```c++
+#include <sys/epoll.h>
+int epoll_create(int size);
+```
+
+  

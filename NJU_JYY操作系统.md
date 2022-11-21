@@ -214,3 +214,23 @@ void consumer() {
 数据竞争：不同的线程同时访问同一段内存，且至少一个是写。
 
 （b'\xcd' * 80).decode('gb2312')
+
+
+
+`gcc -O2 main.c -g`
+
+`gdb a.out`
+
+`start`
+
+`layout src / layout asm`
+
+`record full `： 记录所有的状态
+
+`p val` ：查看val的值
+
+`rsi` ：回退到上一个状态
+
+
+
+gdb 显示 *no source available* :在编译阶段 添加 **-g**选项

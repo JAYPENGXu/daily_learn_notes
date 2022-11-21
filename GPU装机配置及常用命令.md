@@ -60,7 +60,7 @@ $ `sudo apt-get install openssh-server`
 
 $ `dpkg -l | grep ssh`
 
-5.确认ssh-server是否启动
+**5.确认ssh-server是否启动**
 
 $ `ps -e | grep ssh`
 
@@ -210,21 +210,5 @@ windows通过WSL创建虚拟linux环境，通过vscode登录虚拟环境
 
 `ps -e | grep ssh`
 
-**常用shell命令**
 
-`echo hello > hello.txt`
-
-`cat< hello.txt  > hello2.txt`
-
-`cat < hello.txt >> hello2.txt`
-
-`tail -n5`
-
-`ls -l / | tail -n4`
-
-`ls -l / | tail -n4 > ls.md`
-
-`curl --head --silent google.com | grep -i content-Type`
-
-`tee` 用于从标准输入读入数据，并将其内容输出成文件
 

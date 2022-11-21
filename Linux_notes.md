@@ -68,7 +68,7 @@ JAVA_HOME: #jdk的安装目录。
 CLASSPATH: #存放Java导入类的路径，内容是以冒号分隔的路径列表。
 ```
 
-环境变量的修改：为了将对环境变量的修改持久化，可以将修改命令放到  ~/.bashrc文件中，之后执行 source ~/.bashrc 
+**环境变量的修改**：为了将对环境变量的修改持久化，可以将修改命令放到  ~/.bashrc文件中，之后执行 source ~/.bashrc 
 
 ##### chmod 777 代表： 自己、同组、其他能不能读写执行 -rwx-rwx-rwx == 777
 
@@ -197,3 +197,38 @@ clean:
 	rm *.o main
 ```
 
+**常用shell命令**
+
+`echo hello > hello.txt`  ：重定向到hello.txt
+
+`cat< hello.txt  > hello2.txt` ：将hello.txt重定向到hello2.txt
+
+`cat < hello.txt >> hello2.txt`  :将hello.txt中的内容复制两遍到hello2.txt
+
+`tail -n5`
+
+`ls -l / | tail -n4`
+
+`ls -l / | tail -n4 > ls.md`
+
+`curl --head --silent google.com | grep -i content-Type`
+
+`tee` 用于从标准输入读入数据，并将其内容输出成文件
+
+echo "val is $foo"
+
+echo 'val is $foo'
+
+cat <(ls) <(ls ..) > test.md
+
+./example.sh mcd.sh scripts.py example.sh
+
+`find  **/test/*.sh -type f`  ：找到未知父目录下的test文件夹下的以.sh结尾的文件
+
+`find . -name "*.tmp" -exec rm {} \；`  :找到以.tmp后缀结尾的文件，然后执行删除操作
+
+`groups xp` :查看xp用户所在的组
+
+`traceroute www.google.com` : linux查看路由器表和跳转命令
+
+`route -n` ：查看路由表
