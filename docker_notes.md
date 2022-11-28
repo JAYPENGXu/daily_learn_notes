@@ -37,6 +37,7 @@ docker top CONTAINER :#查看某个容器内的所有进程
 docker cp xxx CONTAINER:xxx 或 docker cp CONTAINER:xxx xxx：#在本地和容器间复制文件
 docker rename CONTAINER1 CONTAINER2：#重命名容器
 docker update CONTAINER --memory 500MB：#修改容器限制
+docker port CONTAINERID #查看容器的端口号及映射关系
 ```
 
 

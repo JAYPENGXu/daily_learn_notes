@@ -1,3 +1,5 @@
+**操作系统：系统程序的执行者和中断的管理者**
+
 #### 并发控制：互斥
 
 一切都是状态机！！！
@@ -221,16 +223,43 @@ void consumer() {
 
 `gdb a.out`
 
+`strace ./a.out`
+
 `start`
 
 `layout src / layout asm`
 
 `record full `： 记录所有的状态
 
+`record stop`： 结束记录
+
 `p val` ：查看val的值
 
 `rsi` ：回退到上一个状态
 
-
-
 gdb 显示 *no source available* :在编译阶段 添加 **-g**选项
+
+状态机模型理解世界
+
+程序执行==状态机执行
+
+strace/gdb
+
+操作系统的内核启动：CPU reset -> Firmware -> Boot loader -> Kernel_start() -> ...
+
+退出QEMU  ^a + x
+
+
+
+`starti`
+
+`info inferiors`
+
+`pmap process id` ：查看一个进程的所有地址空间
+
+
+
+
+
+
+

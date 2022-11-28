@@ -358,7 +358,7 @@ int main(){
 }
 ```
 
-try_lock():
+`try_lock()`:
 
 ```c++
 #include <chrono>
@@ -414,6 +414,10 @@ int main()
     thread_2.join();
 }
 ```
+
+`std::ref` ：用于取某个变量的引用，这个引入是为了解决一些传参问题。
+
+`std::bind` :使用的是参数的拷贝而不是引用，因此，必须显示利用`std::ref`来进行绑定。[参考链接](https://murphypei.github.io/blog/2019/04/cpp-std-ref.html#more)
 
 `std::lock_guard`
 
@@ -513,6 +517,14 @@ class Sales_data{
 ```
 
 `volatile`关键字：遇到这个关键字声明的变量，编译器访问该变量的代码就不再进行优化，即编译器生成的汇编代码会重新从变量的地址读取数据，从而实现提供对特殊地址的稳定访问。[参考链接](https://www.runoob.com/w3cnote/c-volatile-keyword.html)
+
+c++11 关键字：thread_local
+
+c++有四种存储周期：`automatic` 、`static`、 `dynamic`、 `thread`、`register`、 `mutable`、
+
+有且只有`thread_local`关键字修饰的变量具有thread周期，这些变量在线程开始的时候被生成，在线程结束的时候被销毁，并且每一个线程都拥有一个独立的变量实例。[参考链接](https://zhuanlan.zhihu.com/p/77585472)、[参考链接2](https://murphypei.github.io/blog/2020/02/thread-local)
+
+`register`:自动存储期，提示编译器将此变量置于寄存器中。
 
 线程：c++11提供的线程类 `std::thread`
 
