@@ -193,7 +193,29 @@ const int *p2 = &ci; //允许改变p2的值，这是一个底层const
 
 `const_cast`在重载函数的情境下最有用。
 
-右值引用：绑定到右值的引用，`&&` ，重要性质：只能绑定倒一个将要销毁的对象。
+`右值引用`：绑定到右值的引用，`&&` ，重要性质：只能绑定倒一个将要销毁的对象。
+
+右值也可以出现在赋值表达式的左边，但是不能作为赋值的对象，因为右值只在当前语句有效，赋值没有意义。`((i > 0) ? i : j) =1;` [参考链接](https://murphypei.github.io/blog/2018/08/cpp-right-reference.html#more)
+
+```c++
+void process_value(int &i){
+    std :: cout << "Lvalue processed:" << i < std :: endl;
+}
+
+void process_value(itn && i){
+    std :: cout<< "Rvalue processed:" << i << std:: endl;
+}
+
+int main(){
+	int a = 0;
+    process_value(a);
+    provess_value(1);
+}
+/*
+LValue processed: 0 
+RValue processed: 1
+*/
+```
 
 <u>左值表达式表示的是一个对象的身份</u>，<u>右值表达式表示的是对象的值</u>。左值与右值的根本区别在于是否允许取地址运算符获得对应的内存地址。
 
@@ -229,6 +251,30 @@ int main()
 	std::cout << i << std::endl; 	 
 }
 out: 101、 102
+```
+
+`转移语义`：可以将资源（堆、系统对象等）从一个对象转移到另一个对象，这样能够减少不必要的临时对象的创建、拷贝和销毁。
+
+`std::move`:既然**编译器只对右值引用才能调用转移构造函数和转移赋值函数**，而**所有命名对象都只能是左值引用**，如果已知一个命名对象不再被使用而想对它调用转移构造函数和转移赋值函数，也就是**把一个左值引用当做右值引用来使用**，怎么做呢？将左值引用转换为右值引用。
+
+```c++
+void ProcessValue(int& i) { 
+ std::cout << "LValue processed: " << i << std::endl; 
+} 
+ 
+void ProcessValue(int&& i) { 
+ std::cout << "RValue processed: " << i << std::endl; 
+} 
+
+int main(){
+    int a = 0;
+    ProcessValue(a);
+    ProcessValue(std::move(a));   
+}
+/*
+LValue processed: 0 
+RValue processed: 0
+*/
 ```
 
 完美转发：

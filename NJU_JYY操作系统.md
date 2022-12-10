@@ -1,5 +1,7 @@
 **操作系统：系统程序的执行者和中断的管理者**
 
+**操作系统：状态机的管理者**
+
 #### 并发控制：互斥
 
 一切都是状态机！！！
@@ -245,7 +247,7 @@ gdb 显示 *no source available* :在编译阶段 添加 **-g**选项
 
 strace/gdb
 
-操作系统的内核启动：CPU reset -> Firmware -> Boot loader -> Kernel_start() -> ...
+操作系统的内核启动：CPU reset -> Firmware -> Boot loader -> Kernel_start() -> 执行第一个程序/bin/init -> 中断/异常的处理程序
 
 退出QEMU  ^a + x
 
@@ -257,9 +259,132 @@ strace/gdb
 
 `pmap process id` ：查看一个进程的所有地址空间
 
+操作系统上的进程
 
+程序：状态机
 
+* C代码视角：语句
+* 汇编/机器码视角：指令
+* 与操作系统交互的方式：syscall
 
+虚拟化：操作系统再物理内存中保存多个状态机
 
+创建状态机： fork:做一份状态机完整的复制（内存，寄存器现场）
 
+`int fork();`
+
+* 立即复制状态机
+* 新创建进程返回0
+* 执行fork的进程返回子进程的进程号
+
+状态机管理：替换状态机
+
+`execve()`
+
+* 将当前运行的状态机重置成另一个程序的初始状态
+
+`int execve(const char *filename, char * const argv, char *const envp);`
+
+* 执行名为filename的程序
+* 允许对新状态机设置参数`argv(v)`和环境变量`envp(e)`，刚好对应了`main()`的参数
+
+`exit()` 终止状态机
+
+* 立即摧毁状态机
+* 销毁当前状态机，并允许有一个返回值
+* 子进程终止会通知父进程
+
+环境变量：
+
+* 使用`env`命令查看 `env | grep DISPLAY`
+* PATH：可执行文件搜索路径
+* PWD
+* HOME：目录
+* DISPLAY：图形输出
+* PS1:shell：的提示符
+* export：告诉shell再创建子进程时设置环境变量
+
+进程的地址空间是如何创建的，如何更改的？
+
+进程地址空间的管理API： `mmap`
+
+静态链接：代码、数据、堆栈、堆区
+
+动态链接：代码、数据、堆栈、堆区、`INTERP`
+
+整个计算机系统如何“构建”：
+
+1. 硬件：从CPU reset开始执行指令
+
+2. Firmware：加载操作系统
+3. 操作系统：状态机的管理者，初始化第一个进程，执行系统调用
+
+shell:用户能直接操作的程序管理操作系统对象，（把用户指令翻译成系统调用的编程语言）。
+
+`man shell` 
+
+内核提供系统调用；shell提供用户接口
+
+**`sh-xv6.c`** : a zero-dependency UNIX Shell 
+
+一个功能完整的shell使用的操作系统对象和API
+
+* session, process group, controlling terminal
+* 文件描述符：open, close, pipe, dup, read, write
+* 状态机管理：fork, execve, exit, wait, signal, kill, setpgid
+
+C标准库
+
+libc：纯粹的计算；文件描述符；更多的进程/操作系统功能；地址空间；无止境封装
+
+workload分析：
+
+* 越小的对象创建/分配越频繁
+  * 字符串、临时变量等，生存周期可长可短
+* 较为频繁地分配中等大小的对象
+  * 较大的数组，复杂的对象，更长的生存周期
+* 低频率的大对象
+  * 巨大的容器，分配器，很长的生命周期
+
+malloc , fast and slow
+
+设置两套系统：
+
+* fast path ：使所有CPU都能并行的申请内存
+  * 性能极好、并行度极高、覆盖大部分情况
+  * 但有小概率会失败
+* slow path
+  * 不在乎那么快
+  * 但把困难的事情做好
+* fast path设计
+  * 线程都事先瓜分一些内存
+  * 默认从自己的领地里分配
+    * 除了再另一个CPU释放
+  * 如果自己的领地不足，就从全局的池子里借一点
+
+`ls > a.txt` 重定向
+
+`ls | wc -l` 管道
+
+`ls &` 后台
+
+`strace -f ./a.out`
+
+`strace -f ./a.out |& vim -`
+
+`strace -f ./a.out 1 2 3 |& vim -`
+
+:setnowrap
+
+fork的应用：
+
+文件描述符：一个指向操作系统内对象的“指针”
+
+* 对象只能通过OS允许的方式访问
+* 从0开始编号（0，1，2分别是stdin, stdout, stderr）
+* 可以通过open取得，close释放，dup复制
+* 对于数据文件，文件描述符会记住上次访问文件的位置
+  * write(2,"a", 1); write(3,"b", 1);
+
+ 
 
