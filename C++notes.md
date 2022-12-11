@@ -872,27 +872,102 @@ int listen(int sockfd, int backlog);
 
 sockfd指定被监听的socket， backlog提示内核监听队列的最大长度。
 
-**Linux下实现IO复用：select poll epoll**
+**Linux下实现IO复用：select、 poll、 epoll**
 
-select系统调用：在一段指定时间内，监听用户感兴趣的文件描述符上的可读、可写和异常等事件。
+`select`系统调用：在一段指定时间内，监听用户感兴趣的文件描述符上的可读、可写和异常等事件。
 
 ```c++
 #include <sys/select.h>
 int select (int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout);
+// 参数解释： nfds:被select管理的描述符个数， fd_set：表示一组描述符集合，select中是用一个位数组来实现， redset、writeset、exeptset ：可读、可写、异常事件集合， timeout：超时时间
+//------其他接口定义
+void FD_ZERO(fd_set *fdset); // clear all bits in fdset
+void FD_SET(int fd, fd_set *fdset); // turn on the bit for fd in fdset
+void FD_CLR(int fd, fd_set *fdset); // turn off the bit for fd in fdset
+int FD_ISSET(int fd, fd_set *fdset); // is the bit for fd on fdset?
 ```
 
-poll系统调用：在指定时间内轮询一定数量的文件描述符，以测试其中是否有就绪者。
+`poll`系统调用：在指定时间内轮询一定数量的文件描述符，以测试其中是否有就绪者。
 
 ```c++
 #include <sys/poll.h>
 int poll (struct pollfd *fds, nfds_t nfds, int timeout);
+//  参数解释：fds:传入的pollfd数组的首地址， nfds：传入位fds数组的长度， timeout：超时时间
+struct pollfd{
+    int fd;
+    short events;
+    short revents; 
+}
 ```
 
-epoll是linux特有的IO复用函数，其使用一组函数来完成任务，而不是单个函数，其次，epoll把用户关心的文件描述符上的事件放在内核里的一个事件表中，从而无需像select和poll那样每次调用都要重复传入文件描述符或事件集。但epoll需要使用一个额外的文件描述符，来唯一标识内核中的这个事件表。这个文件描述符使用如下epoll_create函数来创建：
+`select`和`poll`的区别:
+
+|                            select                            |                             poll                             |
+| :----------------------------------------------------------: | :----------------------------------------------------------: |
+|            底层采用位数组实现，一个描述符对应一位            | 底层通过pollfd结构体实现，管理的描述符通过pollfd数组来组织，一个描述符对应一个pollfd对象 |
+|                  默认大小是FD_SETSIZE(1024)                  |                       采用变长数组管理                       |
+| 相同点：二者在调用时都需要从用户态拷贝管理的全量描述符到内核态，返回时都从 | 内核态拷贝全量的描述符到用户态，再由用户态遍历全量的描述符判断哪些描述符有就绪事件。 |
+
+`epoll`是linux特有的IO复用函数，其使用一组函数来完成任务，而不是单个函数，其次，epoll把用户关心的文件描述符上的事件放在内核里的一个事件表中，从而无需像select和poll那样每次调用都要重复传入文件描述符或事件集。但epoll需要使用一个额外的文件描述符，来唯一标识内核中的这个事件表。这个文件描述符使用如下epoll_create函数来创建：
 
 ```c++
 #include <sys/epoll.h>
 int epoll_create(int size);
+// linux2.6.8之后，size参数已被忽略，但必须>0; epoll_create()创建返回后的epollfd指向内核中的一个epoll实例，同时该epollfd用来调用所有和epoll相关的接口(epoll_ctl(), epoll_wait());当epollfd不再使用时，需要调用close()函数关闭。当所有指向epoll的文件描述符关闭后，内核会摧毁该epoll实例并释放和其关联的资源；失败返回-1；在内核中分配一段空间，并初始化管理监听描述符的数据结构：红黑树、就绪事件链表
+
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event * event);
+// epfd：通过epoll_create()创建的epollfd； op: epoll_ctl_add()、 epoll_ctl_mod()、 epoll_ctl_del(); fd:待监听的描述符fd； event:要监听的fd的事件。（将哪个客户端fd的哪些事件event交给哪个epoll来管理）；暴漏给上层用户的对底层红黑树的增删改接口
+
+int epoll_wait(int epfd, struct epoll_event * events, int maxevents, int timeout);
+//可以就绪事件链表中获取就绪时间关联的描述符，然后填充到events中并返回给上层用户
 ```
 
-  
+  epoll的ET（边缘触发）模式和LT（水平触发）模式：
+
+|                ET                |                            LT                            |
+| :------------------------------: | :------------------------------------------------------: |
+| 仅当监控的描述符有事件就绪时触发 | 当监控的描述符有时间iuxu或就绪事件未完全处理完时都会触发 |
+|         系统调用次数更少         |                     系统调用次数更多                     |
+|   数据完整性交由上层用户态保证   |       数据完整性交由内核来保证，epoll默认是LT模式        |
+
+
+
+long long 是一个有符号类型，对应的无符号类型 unsigned long long；
+
+long long int == long long
+
+unsigned long long == unsigned long long
+
+C++ 标准还为其定义LL 和 ULL 作为两种类型的字面量后缀 -> long long x = 65536LL;
+
+long long 用于枚举和位域
+
+```c++
+enum longlong_enum : long long {
+	x1,
+	x2
+}
+```
+
+```c++
+struct longlong_struct {
+	long long x1 : 8;
+	long long x2 : 24;
+	long long x3 : 32;
+}
+```
+
+C++11标准为三种编码提供了新前缀用于声明三种编码字符和字符串的字面量，分别是UTF-8的前缀u8,UTF-16的前缀u，和UTF-32的前缀U。
+
+```c++
+char uft8c = u8'a';
+char16_t utf16c = u'好';
+char32_t utf32c = U'好';
+char utf8[] = u8"你好世界";
+char16_t utf16[] = u"你好世界";
+char32_t utf32[] = U"你好世界";
+```
+
+char uft8c = u8'a'; 在C++11中编译报错，由于u8只能作为字符串字面量的前缀，而无法作为字符的前缀。
+
+char utf8c = u8"好"编译报错，存储"hao"需要三个字节，显然utf8c只能存储1字节。
