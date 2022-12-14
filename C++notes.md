@@ -930,7 +930,15 @@ int epoll_wait(int epfd, struct epoll_event * events, int maxevents, int timeout
 |         系统调用次数更少         |                     系统调用次数更多                     |
 |   数据完整性交由上层用户态保证   |       数据完整性交由内核来保证，epoll默认是LT模式        |
 
+网络模型总结：
 
+| 开源组件  | epoll触发模式 |         网络模型          |
+| :-------: | :-----------: | :-----------------------: |
+|   redis   |      LT       |    Single-Reactor模型     |
+|  skynet   |      LT       |    Single-Reactor模型     |
+| memcached |      LT       | Multi-Reactor(多线程)模型 |
+|   nginx   |      ET       | Multi-Reactor(多进程)模型 |
+|   netty   |      ET       | Multi-Reactor(多线程)模型 |
 
 long long 是一个有符号类型，对应的无符号类型 unsigned long long；
 
