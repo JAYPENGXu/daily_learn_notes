@@ -124,8 +124,6 @@ ag 'thrift'
 
 `pip install xxx --user --upgrade`:安装python包
 
-`gcc main.c -o hello`
-
 `^E` *means* `ctrl+E`
 
 `alias`：可以为命令设置别名
@@ -133,8 +131,6 @@ ag 'thrift'
 `alias matlab="/usr/local/Polyspace/R2021a/bin/matlab"`
 
 `source ~/.bashrc`
-
-`gcc main.c -o main` 编译main.c文件
 
 `gcc -g main.c -o main` 编译main.c文件 -g保留调试信息
 

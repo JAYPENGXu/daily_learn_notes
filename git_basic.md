@@ -1,5 +1,8 @@
-#### git_notes
+#### git_basic
 工作区 -> 暂存区 -> 版本库
+
+#### git init :将当前目录配置成git仓库，信息记录在隐藏的.git文件中
+
 #### 通过 git add 命令将文件加载到暂存区
 如： git add readme.txt
 #### 通过 git commit 命令将文件从暂存区添加到当前分支
@@ -29,9 +32,21 @@ git diff readme.txt
 
 #### rm a.txt b.txt 删除 两个文件，同时 git add  a.txt b.txt 存入到暂存区，不仅可以增加文件，也可以删除文件
 
+#### git checkout branch_name :切换到branch_name这个分支
+
+#### git branch :查看所有分支和当前所处分支
+
+#### git branch branch_name : 创建新分支
+
+#### git merge branch_name :将分支branch_name合并到当前分支
+
+#### git branch -d branch_name ： 删除本地仓库的branch_name分支
+
+#### git push -d origin branch_name : 删除远程仓库中的branch_name分支
+
 
 #### SSH 方式连接云端仓库
-#### 公钥在 。ssh/文件夹中， 通过 cat id_rsa.pub查看公钥
+#### 公钥在  .ssh/文件夹中， 通过 cat id_rsa.pub查看公钥
 #### 将tmux中的文本复制到 windows中： 按住shift 鼠标拖住选中文本，按ctrl+ins复制文本， 回到windows中，按shift+ins粘贴文本
 
 #### git remote add origin git@git.acwing.com:Jacky/git_project2.git 将本地文件夹与云端仓库建立连接

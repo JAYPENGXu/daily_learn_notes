@@ -5,6 +5,8 @@ docker --version
 
 #将当前用户加入安装中自动创建的docker用户组
 sudo usermod -aG docker $USER
+
+sudo chmod 666 /var/run/docker.sock
 ```
 
 #### 镜像
@@ -15,6 +17,7 @@ docker images : #列出本地所有镜像
 docker image rm ubuntu:20.04 或 docker rmi ubuntu:20.04 :#删除镜像ubuntu:20.04
 docker save -o ubuntu_20_04.tar ubuntu:20.04 #将镜像ubuntu:20.04导出到本地文件 ubuntu_20_04.tar中
 docker load -i ubuntu_20_04.tar :#将镜像ubuntu:20.04从本地文件ubuntu_20_04.tar中加载出来
+docker run -p 20000:22 --name my_docker_server -itd docker_lesson:1.0  # 创建并运行docker_lesson:1.0镜像
 ```
 
 #### 容器
