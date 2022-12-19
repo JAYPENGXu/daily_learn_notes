@@ -104,6 +104,8 @@ ag 'thrift'
 
 `md5sum` 计算md5哈希值 md5sum main.cpp
 
+`sha1sum` :输出一个文件的SHA1哈希值
+
 `time command` 统计command 命令的执行时间
 
 `time free`

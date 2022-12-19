@@ -49,9 +49,7 @@ git diff readme.txt
 #### 公钥在  .ssh/文件夹中， 通过 cat id_rsa.pub查看公钥
 #### 将tmux中的文本复制到 windows中： 按住shift 鼠标拖住选中文本，按ctrl+ins复制文本， 回到windows中，按shift+ins粘贴文本
 
-#### git remote add origin git@git.acwing.com:Jacky/git_project2.git 将本地文件夹与云端仓库建立连接
 #### git push -u origin master 将本地文件夹push到云端仓库中（注意是master）
 
-#### 从云端将文件夹clone到本地 git clone git@git.acwing.com:Jacky/git_project2.git
 #### 当查看log时， 按 q 退出
 
