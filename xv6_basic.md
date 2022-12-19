@@ -83,13 +83,13 @@ int main(){
 }
 ```
 
-避免创建重复进程然后立即替换它的浪费,操作内核通过使用虚拟内存技术（如写时复制）优化此用例的 fork 实现。xv6 隐式分配大部分用户空间内存：fork 分配父内存的子副本所需的内存，exec 分配足够的内存来保存可执行文件。在运行时需要更多内存的进程（可能是 malloc）可以调用 sbrk(n) 将其数据内存增加 n 字节； sbrk 返回新内存的位置。
+避免创建重复进程然后立即替换它的浪费,操作内核通过使用虚拟内存技术（如写时复制）优化此用例的 fork 实现。xv6 隐式分配大部分用户空间内存：fork 分配父内存的子副本所需的内存，exec 分配足够的内存来保存可执行文件。在运行时需要更多内存的进程（可能是 `malloc`）可以调用 `sbrk(n)` 将其数据内存增加 n 字节； `sbrk` 返回新内存的位置。
 
 1.2 输入输出和文件描述符 (I/O and File descriptors)
 
 文件描述符时用来表征一个进程将从那里读取或者写入到哪里的内核管理对象。一个进程可以通过打开一个文件、目录或设备或创建一个管道，或复制一个已经存在的描述符。文件描述符接口抽象了文件、管道和设备之间的差异，使它们看起来都像字节流。xv6 内核使用文件描述符作为每个进程表的索引，因此每个进程都有一个从零开始的文件描述符的私有空间。每个进程都拥有自己独立的文件描述符列表，其中0是标准输入，1是标准输出，2是标准错误。shell将保证总是有3个文件描述符是可用的。
 
-`int read(int fd,char * buf,int n)`; 从文件描述符fd中读取n字节的数据拷贝到buf中，返回值是读取的字节数。每个文件描述符都有一个与之相关的offset。read 从当前文件偏移量读取数据，然后将该偏移量增加读取的字节数，下一个read将从新的offset开始读取字节，当没有更多的字节可以读取时，read返回0来表示读取到文件的结束。
+`int read(int fd,char * buf,int n)`; 从文件描述符fd中读取n字节的数据拷贝到buf中，**返回值是读取的字节数**。每个文件描述符都有一个与之相关的offset。read 从当前文件偏移量读取数据，然后将该偏移量增加读取的字节数，下一个read将从新的offset开始读取字节，当没有更多的字节可以读取时，read返回0来表示读取到文件的结束。
 
 `int write(int fd, char *buf,int n)`；从buf中写入n字节的数据到文件描述符fd中，返回值是有多少的字节数据被写入。当少于n个字节的数据被写入时互出现错误，通read一样存在偏移量。
 
@@ -199,18 +199,18 @@ mknod("/console", 1, 1);
 
 文件名与文件本身不同； 同一个底层文件，称为索引节点（inode），可以有多个名称，称为links。每个链接都包含目录中的一个条目； 该条目包含一个文件名称和对 inode 的引用。inode 保存有关文件的元数据，包括其类型（文件或目录或设备）、长度、文件内容在磁盘上的位置以及文件的链接数。
 
-`int fstat(int fd, struct stat *st)` ：系统调用从文件描述符引用的 inode 检索信息，将inode中的相关信息存储到st中。在 stat.h (kernel/stat.h) 中定义为：
+`int fstat(int fd, struct stat *st)` ：系统调用从文件描述符**fd**引用的 inode 检索信息，将inode中的相关信息存储到**st**中。执行成功返回0， 失败返回-1。在 stat.h (kernel/stat.h) 中定义为：
 
 ```c
 #define  T_DIR 1
 #define T_FILE 2
 #define T_DEVICE 3
 struct stat{
-    int dev;
-    uint ino;
-    short type;
-    short nlink;
-    uint64 size;
+    int dev; //file system's disk device
+    uint ino; //inode number
+    short type; //type of file
+    short nlink; // number of links to file
+    uint64 size; //size of file in bytes
 };
 ```
 
@@ -268,4 +268,32 @@ int main(int argc, char *argv[]){
     }
 }
 ```
+
+素数筛法：使用pipe和fork实现流水线，将一组数范围为2到35喂入到一个进程中，先打印出最小的一个数，这个数是素数，之后用其他的数来除这个素数，如果可以整除则将其drop，不能整除的喂入到下一个进程，直到打印出所有的素数。
+
+
+
+
+
+实现find：使用递归的方式找到指定的文件夹下的目标文件，参考user/ls.c实现方法：
+
+```c
+// hints:1.
+struct dirent {
+    ushort inum;
+    char name[DIRSIZE];
+}
+//hints:2.
+void *memmove(void *str1, const void *str2, size_t n);//从str2复制n个字符到str1，返回一个指向目标存储区str1的指针。
+```
+
+
+
+
+
+实现xargs：
+
+`xargs`的作用是把stdin中的数据用空格或回车分割成命令行参数
+
+例：`find .-name '*.py' | xargs cat | wc -l` :统计当前目录下所有python文件的总行数
 
