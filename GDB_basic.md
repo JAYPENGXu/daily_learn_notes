@@ -197,3 +197,10 @@ handle <SIG> <operation>
 - restart：重新debug
 - b <line> , b 6 在第6行设置断点
 - p locals() : 查看所有变量当前的值
+
+`hyperfine`：命令行基准测试工具
+
+`hyperfine <command> ...`
+
+`hyperfine --warmup 3 'fd -HI "[0-9]\.jpg" ' 'find -name "[0-9].jpg"'` :演示fd和find的基准测试
+
