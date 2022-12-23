@@ -230,3 +230,15 @@ cat <(ls) <(ls ..) > test.md
 `traceroute www.google.com` : linux查看路由器表和跳转命令
 
 `route -n` ：查看路由表
+
+妙用sed的替换，对行操作
+
+`sed 's/unix/linux/g' test.txt` ：用linux替换全部unix
+
+`sed '3 s/unix/linux/g' test.txt` ：只替换第三个
+
+`sed '1,3 s/unix/linux/' test.txt` ：替换一个范围
+
+ awk指令,对列操作
+
+`awk '{print $1, $2}' filename`
