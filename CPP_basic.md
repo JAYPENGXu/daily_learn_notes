@@ -874,6 +874,8 @@ sockfd指定被监听的socket， backlog提示内核监听队列的最大长度
 
 **Linux下实现IO复用：select、 poll、 epoll**
 
+服务器要管理多个客户端的连接，而recv函数只能监听单个socket，因此引入了select/poll。
+
 `select`系统调用：在一段指定时间内，监听用户感兴趣的文件描述符上的可读、可写和异常等事件。
 
 ```c++
@@ -905,10 +907,10 @@ struct pollfd{
 |                            select                            |                             poll                             |
 | :----------------------------------------------------------: | :----------------------------------------------------------: |
 |            底层采用位数组实现，一个描述符对应一位            | 底层通过pollfd结构体实现，管理的描述符通过pollfd数组来组织，一个描述符对应一个pollfd对象 |
-|                  默认大小是FD_SETSIZE(1024)                  |                       采用变长数组管理                       |
+|           能监听的fd个数默认大小是FD_SETSIZE(1024)           |                       采用变长数组管理                       |
 | 相同点：二者在调用时都需要从用户态拷贝管理的全量描述符到内核态，返回时都从 | 内核态拷贝全量的描述符到用户态，再由用户态遍历全量的描述符判断哪些描述符有就绪事件。 |
 
-`epoll`是linux特有的IO复用函数，其使用一组函数来完成任务，而不是单个函数，其次，epoll把用户关心的文件描述符上的事件放在内核里的一个事件表中，从而无需像select和poll那样每次调用都要重复传入文件描述符或事件集。但epoll需要使用一个额外的文件描述符，来唯一标识内核中的这个事件表。这个文件描述符使用如下epoll_create函数来创建：
+`epoll`是linux特有的IO复用函数，是linux内核为了处理大批量的文件描述符而改进的`poll`，可以显著提高程序在大量并发连接中只有少量活跃的的情况下的系统的CPU利用率。其使用一组函数来完成任务，而不是单个函数，其次，`epoll`把用户关心的文件描述符上的事件放在内核里的一个事件表中，从而无需像select和poll那样每次调用都要重复传入文件描述符或事件集。但`epoll`需要使用一个额外的文件描述符，来唯一标识内核中的这个事件表。这个文件描述符使用如下`epoll_create`函数来创建：
 
 ```c++
 #include <sys/epoll.h>
@@ -920,9 +922,38 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event * event);
 
 int epoll_wait(int epfd, struct epoll_event * events, int maxevents, int timeout);
 //可以就绪事件链表中获取就绪时间关联的描述符，然后填充到events中并返回给上层用户
+// epfd:待处理的epoll实例描述符；events:用于存放epoll_event的数组指针；maxevents：最长返回多少个时间至events数组中，该参数须大于0；timeout:最长等待/阻塞时间（毫秒），置为-1将导致该函数无期限阻塞，置为0函数立即返回，而不管是否存在可用事件。该时间基于CLOCK_MONOTONIC时钟测量。
+
+int epoll_pwait(int epfd, struct epoll_event *events, int maxevents, int timeout, 
+               const sigset_t *sigmask); //不同于epoll_wait的是可以指定忽略部分信号
+//执行成功，返回处于就绪状态的文件描述符个数。
+// 如果等待超时，返回0， 表示没有处于就绪状态的fd。
+//发生错误，返回-1并设置errno。
+
+typedef union epoll_data {
+    void *ptr;
+    int fd;
+    uint32_t u32;
+    uint64_t u64;
+} epoll_data_t;
+
+struct epoll_event {
+    uint32_t events;  // epoll events
+    epoll_data_t data; // user data variable
+};
 ```
 
-  epoll的ET（边缘触发）模式和LT（水平触发）模式：
+`epoll`所支持的`fd`上限是最大可以打开的数目，具体可`cat/proc/sys/fs/file-max`查看。  当存在部分活跃socket时，传统select/poll会线性扫描整个socket集合，这会让效率随着socket数量的增加而线性降低，而这就限制了select最大监视数量的原因，程序被唤醒后不知道哪个socker处于活跃状态，需要遍历。而`epoll`是基于每个fd上面的`callback`函数实现的，云此只会对活跃的socket进行处理，效率更高。
+
+select、poll、epoll之间的区别：
+
+`select`:只知道有I/O时间发生，但不知道是具体哪一个，因此只能无差别的遍历有所流，时间复杂度O(n).
+
+`poll`:大致同上，轮询所有套接字，时间复杂度O(n)，但fd没有数量限制，因为它是用链表存储fd。
+
+`epoll`:时间驱动，epoll会把哪个流发生了怎样的I/O时间通知给用户，时间复杂度O(1)。
+
+epoll的ET（边缘触发）模式和LT（水平触发）模式：
 
 |                ET                |                            LT                            |
 | :------------------------------: | :------------------------------------------------------: |
