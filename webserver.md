@@ -445,3 +445,681 @@ read/recv & write/send
 对于 read 函数来说，由于数据取决于**远程**，因此当接收到 EAGAIN 时终止读取，直接返回；但对于 write 函数来说，由于数据取决于**当前服务器**，因此可以继续循环写入，直至数据完全写入。
 
 对于 recv/send 函数来说，与 read/write 相比，将会额外多出部分专用于 socket 的错误码，例如 ECONNREFUSED、EPIPE 以及 ECONNRESET 等等。出于调试目的，在实现 读写函数的 wrapper时，将这两类读写函数全部集成在 wrapper中，并用一个bool参数来控制启用 read/write 还是 recv/send 函数。
+
+阻塞/非阻塞 读取
+
+对于读取操作来说，阻塞读取和非阻塞读取有所不同：
+
+* 当有数据到来时，阻塞和非阻塞的实现相同，都是读取数据并立即返回。
+* 但是当没有数据到来时，由于非阻塞读取时会返回EAGAIN错误，因此可以立即返回，二阻塞读取此时就必须阻塞，直到数据到来时才返回。
+
+返回值：
+
+read/recv & write/send 函数的返回值
+
+* 若为负数则说明存在错误
+* 若为0则说明连接中断
+* 若为正数则该数为成功读取/发送的字节数
+
+最终代码实现：
+
+```c
+// read/recv 函数实现的wrapper如下：
+ssize_t readn(int &fd, void * buf, sizes_t len, bool isBlock, bool isRead){
+    char *pos = (char *) buf;
+    size_t leftNum = len;
+    ssize_t readNum = 0;
+    while(leftNum > 0){
+        ssize_t tmpRead = 0;
+        //循环读取， 如果报错，则进行判断
+        // read的返回值为0则表示读取到EOF，是正常现象
+        if(isRead) tmpRead = read(fd, pos, leftNum);
+        else tmpRead = recv(fd, pos, leftNum, (isBlock ? 0 : MSG_DONTWAIT));
+        if(tmpRead < 0){
+            if(errno == EINTR) tmpRead = 0;
+            //如果始终读取不到数据，则提前返回，因为整个取决于远程fd，无法预测等待时间
+            else if(errno == EAGAIN) return readNum;
+            else return -1;
+        }
+        if(tmpRead == 0) break; //读取到0，则说明远程连接已经关闭
+        readNum += tmpRead;
+        pos += tmpRead;
+        //如果是阻塞模式，并且读取到的数据较小，则说明数据已经全部读取完成，直接返回
+        if(isBlock && static_cast<size_t> (tmpRead)  < leftNum) break;
+        leftNum -= tmpRead;
+    }
+    return readNum;
+}
+```
+
+```c
+// write/send 函数的wrapper
+ssize_t written(int fd, void *buf, size_t len, bool isWrite){
+    char *pos = (char *) buf;
+    size_t leftNum = len;
+    ssize_t writtenNum = 0;
+    while(leftNum > 0){
+        ssize_t tmpWrite = 0;
+        if(isWrite) tmpWrite = write(fd, pos, leftNum);
+        else tmpWrite = send(fd, pos, leftNum, 0);
+        if(tmpWirte < 0){ //尝试循环写入，如果报错则进行判断
+            //与read不同的是，如果EAGAIN， 则继续重复写入，因为写入操作是由server这边决定
+            if(errno == EINTR || errno == EAGAIN) tmpWrite = 0;
+            else return -1;
+        }
+        if(tmpWrite == 0) break;
+        writtenNum += tmpWrite;
+        pos += tmpWrite;
+        leftNum -= tmpWrite;
+    }
+    return writtenNum;
+}
+```
+
+建立连接：
+
+```c
+int socket_bind_and_listen(int port){
+    int listen_fd = 0;
+    //开始创建socket，这是阻塞模式的socket
+    // AF_INET     : ipv4 IP
+    // SOCK_STREAM : TCP socket
+    if((listen_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) return -1;
+    
+    //绑定端口
+    sockaddr_in_server_addr;
+    //初始化
+    memset(&server_addr, '\0', sizeof(server_addr));
+    //设置基本操作
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port  =htons((unsigned short) port);
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    //端口复用
+    int opt = 1;
+    if(setsockeopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) 
+        return -1;
+    //试着bind
+    if(bind(listen_fd, (sockaddr *) &server_addr, sizeof(server_addr)) == -1)
+        return -1;
+    //试着listen,设置最大队列长度为1024
+    if(listen(listen_fd, 1024) == -1) return -1;
+    return listen_fd;
+}
+```
+
+忽略SIGPIPE信号：
+
+SIGPIPE信号将在远程连接被中断时发出。默认的处理历程是终止程序。而这很明显不是我们所期望的处理方式。因此我们必须设置 WebServer 忽视 SIGPIPE 信号，以免被意外终止。
+
+```c
+void handleSignpipe(){
+    struct sigaction sa;
+    memset(&sa, '\0', sizeof(sa));
+    sa.sa_handler = SIG_IGN;
+    sa.sa_flags = 0;
+    if(sigaction(SIGPIPE, &sa, NULL) == -1) 
+        LOG(ERROR) << "Ignore SIGPIPE failed!" << strerror(errno) << std :: endl;
+}
+```
+
+日志输出：
+
+只将信息输出到中断的stdout, stderr， 没有建立日志文件。
+
+```c
+/**
+ * @brief   输出信息相关宏定义与函数
+ *          使用 `LOG(INFO) << "msg";` 形式以执行信息输出.
+ * @note    注意: 该宏功能尚未完备,多线程下使用LOG宏将会导致输出数据混杂
+ */
+#define INFO    1           /* 普通输出 */
+#define ERROR   2           /* 错误输出 */
+#define LOG(x)  logmsg(x)   /* 调用输出函数 */
+
+std::ostream& logmsg(int flag)
+{
+    // 输出信息时,设置线程互斥
+    // 获取线程 TID
+    long tid = syscall(SYS_gettid);
+    if(flag == ERROR)
+    {
+        std::cerr << tid << ": [ERROR]\t";
+        return std::cerr;       
+    }
+    else if(flag == INFO)
+    {
+        std::cout << tid << ": [INFO]\t";
+        return std::cout;
+    }
+    else
+    {
+        logmsg(ERROR) << "错误的 LOG 选择" << std::endl;
+        abort();
+    }
+}
+```
+
+五、Http请求处理
+
+当 Server 成功与 Client 建立连接后，Client 将会发送数据至 Server，此时 Server 就需要解析数据并进一步将目标数据传送回 Client。其中，http报文的解析和http header的处理便是重点。
+
+连接：当建立起一个新的客户端套接字后，目标事件将被放进世家队列中，等待空闲线程处理。 
+
+```c
+void handlerConnect(void* arg)
+{
+    int* fd_ptr = (int*)arg;
+    int client_fd = *fd_ptr;  //取出client_fd
+    delete fd_ptr;
+
+    if(client_fd < 0)
+    {
+        LOG(ERROR) << "client_fd error in handlerConnect" << endl;
+        return;
+    }
+    HttpHandler handler(client_fd); //初始化HttpHandler实例
+    handler.RunEventLoop(); //调用HttpHandler::RunEventLoop函数
+    close(client_fd); //释放client_fd
+}
+```
+
+**HttpHandler** 支持部分 HTTP/1.1 版本的特性——**持续连接**。默认情况下，执行其 RunEventLoop 成员函数时，将循环读取来自客户端的请求，处理并返回对应的响应报文。HttpHandler 的整体代码结构如下所示，主要是由多个成员函数以及少数几个成员变量组成。RunEventLoop 函数是启动整个处理请求循环的一个开关函数:
+
+```c
+/**
+ * @brief HttpHandler 类处理每一个客户端连接,并根据读入的http报文,动态返回对应的response
+ *        其支持的 HTTP 版本为 HTTP/1.1
+ * @note  该类只实现了部分异常处理,没有涵盖大部分的异常(不过暂时也够了)
+ */ 
+class HttpHandler
+{
+public:
+    /**
+     *  @brief HttpHandler内部状态 
+     */ 
+    enum ERROR_TYPE {
+        ERR_SUCCESS = 0,                // 无错误
+        ERR_READ_REQUEST_FAIL,          // 读取请求数据失败
+        ERR_NOT_IMPLEMENTED,            // 不支持一些特定的请求操作,例如 Post
+        ERR_HTTP_VERSION_NOT_SUPPORTED, // 不支持当前客户端的http版本
+        ERR_INTERNAL_SERVER_ERR,        // 程序内部错误
+        ERR_CONNECTION_CLOSED,          // 远程连接已关闭
+        ERR_BAD_REQUEST,                // 用户的请求包中存在错误,无法解析  
+        ERR_SEND_RESPONSE_FAIL          // 响应包发送失败
+    };
+
+    /**
+     * @brief   显式指定 client fd
+     * @param   fd 连接的 fd, 初始值为 -1
+     */
+    explicit HttpHandler(int fd = -1);
+
+    /**
+     * @brief   释放所有 HttpHandler 所使用的资源
+     * @note    注意,不会主动关闭 client_fd
+     */
+    ~HttpHandler();
+
+    /**
+     * @brief   为当前连接启动事件循环
+     * @note    1. 在执行事件循环开始之前,一定要设置 client fd
+     *          2. 异常处理不完备
+     */ 
+    void RunEventLoop();
+
+    // 只有getFd,没有setFd,因为Fd必须在创造该实例时被设置
+    int getClientFd()           { return client_fd_; }
+
+private:
+    const size_t MAXBUF = 1024;
+
+    int client_fd_;
+    // http 请求包的所有数据
+    string request_;
+    // http 头部
+    unordered_map<string, string> headers_; 
+    
+    // 请求方式
+    string method_;
+    // 请求路径
+    string path_;
+    // http版本号
+    string http_version_;
+    // 是否是 `持续连接`
+    // NOTE: 为了防止bug的产生,对于每一个类中的isKeepAlive_来说,
+    //       值只能从 true -> false,而不能再次从 false -> true
+    bool isKeepAlive_;
+
+    // 当前解析读入数据的位置
+    /** 
+     * NOTE: 该成员变量只在 
+     *      readRequest -> parseURI -> parseHttpHeader -> RunEventLoop 
+     * 内部中使用
+     */
+    size_t pos_;
+    
+    /**
+     * @brief 将当前client_fd_对应的连接信息,以 LOG(INFO) 的形式输出
+     */
+    void printConnectionStatus();
+
+    /**
+     * @brief 从client_fd_中读取数据至 request_中
+     * @return 0 表示读取成功, 其他则表示读取过程存在错误
+     * @note 内部函数recvn在错误时会产生 errno
+     */
+    ERROR_TYPE readRequest();
+
+    /**
+     * @brief 从0位置处解析 请求方式\URI\HTTP版本等
+     * @return 0 表示成功解析, 其他则表示解析过程存在错误
+     */
+    ERROR_TYPE parseURI();
+
+    /**
+     * @brief 从request_中的pos位置开始解析 http header
+     * @return 0 表示成功解析, 其他则表示解析过程存在错误
+     */
+    ERROR_TYPE parseHttpHeader();
+    
+    /**
+     * @brief   发送响应报文给客户端
+     * @param   responseCode        http 状态码, http报文第二个字段
+     * @param   responseMsg         http 报文第三个字段
+     * @param   responseBodyType    返回的body类型,即 Content-type
+     * @param   responseBody        返回的body内容
+     * @return 0 表示成功发送, 其他则表示发送过程存在错误
+     */
+    ERROR_TYPE sendResponse(const string& responseCode, const string& responseMsg, 
+                      const string& responseBodyType, const string& responseBody);
+    
+    /**
+     * @brief 发送错误信息至客户端
+     * @param errCode   错误http状态码
+     * @param errMsg    错误信息, http报文第三个字段
+     * @return 0 表示成功发送, 其他则表示发送过程存在错误
+     */
+    ERROR_TYPE handleError(const string& errCode, const string& errMsg);
+
+    /**
+     * @brief 将传入的字符串转义成终端可以直接显示的输出
+     * @param str 待输出的字符串
+     * @return 转义后的字符串
+     * @note  是将 '\r' 等无法在终端上显示的字符,转义成 "\r"字符串 输出
+     */
+    string escapeStr (const string& str);
+};
+```
+
+错误类型：
+
+```c
+/**
+*  @brief HttpHandler内部状态 
+*/ 
+enum ERROR_TYPE {
+    ERR_SUCCESS = 0,                // 无错误
+    ERR_READ_REQUEST_FAIL,          // 读取请求数据失败
+    ERR_NOT_IMPLEMENTED,            // 不支持一些特定的请求操作,例如 Post
+    ERR_HTTP_VERSION_NOT_SUPPORTED, // 不支持当前客户端的http版本
+    ERR_INTERNAL_SERVER_ERR,        // 程序内部错误
+    ERR_CONNECTION_CLOSED,          // 远程连接已关闭
+    ERR_BAD_REQUEST,                // 用户的请求包中存在错误,无法解析  
+    ERR_SEND_RESPONSE_FAIL          // 响应包发送失败
+};
+//除了第一种 ERR_SUCCESS 表示无错误以外，其余的错误类型都有对应的错误处理方式，例如终止连接或者向客户端发送一个特定的响应报文，我们将在下面的内容中提到这些错误处理方式。
+```
+
+读取请求数据：
+
+当远程客户端发送数据至服务器端时，无论传来的是什么数据，首先要做的就是将数据从缓存中读取并保存至自己的缓冲区内。读取时需要明确一点：使用**阻塞方式**读取。因为每个客户端连接都是由单独的线程进行处理的，倘若服务器端没有将所有的请求数据全部读完，那么自然就无法继续执行下去。
+
+同时还需要明确一点的是，调用 readn 函数读取数据时，有可能客户端传来的数据较多，使得读取到的字节数刚好等于传入 readn 的最大缓冲区大小，那么此时就必须保存并继续循环读取，因为这里可能还有一部分数据没有读取完成，仍然需要继续读取。只有当 readn 函数返回的值小于传入的最大缓冲区大小，才能说明来自客户端的数据已经全部读取完成。此时就可以退出*读取请求函数*。
+
+最后，readn 函数可能会因为出错、远程连接中断等意外情况返回负数，因此这里需要额外写一点错误处理，返回对应原因的错误枚举 ERR_READ_REQUEST_FAIL 或者 ERR_CONNECTION_CLOSED 等等。
+
+```c
+HttpHandler::ERROR_TYPE HttpHandler::readRequest()
+{
+    // 清除之前的数据
+    request_.clear();
+    pos_ = 0;
+
+    char buffer[MAXBUF];
+    
+    // 循环阻塞读取 ------------------------------------------
+    for(;;)
+    {
+        ssize_t len = readn(client_fd_, buffer, MAXBUF, true, true);
+        if(len < 0)
+            return ERR_READ_REQUEST_FAIL;
+        /** 
+         * 如果此时没读取到信息并且之前已经读取过信息了,则直接返回.
+         * 这里需要注意,有些连接可能会提前连接过来,但是不会马上发送数据.因此需要阻塞等待
+         * 这里有个坑点: chromium在每次刷新过后,会额外开一个连接,用来缩短下次发送请求的时间
+         * 也就是说这里大概率会出现空连接,即连接到了,但是不会马上发送数据,而是等下一次的请求.
+         * 
+         * 如果读取到的字节数为0,则说明远程连接已经被关闭.
+         */
+        else if(len == 0)
+        {
+            // 对于已经读取完所有数据的这种情况
+            if(request_.length() > 0)
+                // 直接停止读取
+                break;
+            // 如果此时既没读取到数据,之前的 request_也为空,则表示远程连接已经被关闭
+            else
+                return ERR_CONNECTION_CLOSED;
+        }
+        // 将读取到的数据组装起来
+        string request(buffer, buffer + len);
+        request_ += request;
+
+        // 由于当前的读取方式为阻塞读取,因此如果读取到的数据已经全部读取完成,则直接返回
+        if(static_cast<size_t>(len) < MAXBUF)
+            break;
+    }
+    return ERR_SUCCESS;
+}
+```
+
+解析URI:
+
+```c
+HttpHandler::ERROR_TYPE HttpHandler::parseURI()
+{
+    if(request_.empty())   return ERR_BAD_REQUEST;
+
+    size_t pos1, pos2;
+    
+    pos1 = request_.find("\r\n");
+    if(pos1 == string::npos)    return ERR_BAD_REQUEST;
+    string&& first_line = request_.substr(0, pos1);
+    // a. 查找get
+    pos1 = first_line.find(' ');
+    if(pos1 == string::npos)    return ERR_BAD_REQUEST;
+    method_ = first_line.substr(0, pos1);
+
+    string output_method = "Method: ";
+    if(method_ == "GET")
+        output_method += "GET";
+    else
+        return ERR_NOT_IMPLEMENTED;
+    LOG(INFO) << output_method << endl;
+
+    // b. 查找目标路径
+    pos1++;
+    pos2 = first_line.find(' ', pos1);
+    if(pos2 == string::npos)    return ERR_BAD_REQUEST;
+
+    // 获取path时,注意去除 path 中的第一个斜杠
+    pos1++;
+    path_ = first_line.substr(pos1, pos2 - pos1);
+    // 如果 path 为空,则添加一个 . 表示当前文件夹
+    if(path_.length() == 0)
+        path_ += ".";
+    
+    // 判断目标路径是否是文件夹
+    struct stat st;
+    if(stat(path_.c_str(), &st) == 0)
+    {
+        // 如果试图打开一个文件夹,则添加 index.html
+        if (S_ISDIR(st.st_mode))
+            path_ += "/index.html";
+    }
+
+    LOG(INFO) << "Path: " << path_ << endl;
+
+    // c. 查看HTTP版本
+    // NOTE 这里只支持 HTTP/1.0 和 HTTP/1.1
+    pos2++;
+    http_version_ = first_line.substr(pos2, first_line.length() - pos2);
+    LOG(INFO) << "HTTP Version: " << http_version_ << endl;
+
+    // 检测是否支持客户端 http 版本
+    if(http_version_ != "HTTP/1.0" && http_version_ != "HTTP/1.1")
+        return ERR_HTTP_VERSION_NOT_SUPPORTED;
+    // 设置只在 HTTP/1.1时 允许 持续连接
+    if(http_version_ != "HTTP/1.1")
+        isKeepAlive_ = false;
+
+    // 更新pos_
+    pos_ = first_line.length() + 2;
+    return ERR_SUCCESS;
+}
+```
+
+解析HTTP header:
+
+从HTTP报文第二行开始，每个以 `\r\n`为结尾的一行数据中，都有一个 `key: value`的键值对（header最后一行除外）。因此我们需要继续遍历请求报文的数据，将每个 HTTP header 存入数据结构中。如果解析报文的时候出现错误，则返回 ERR_BAD_REQUEST 错误。
+
+这里有个点需要注意：HTTP/1.1默认支持**持续连接**，因此 HttpHandler 的成员变量 isKeepAlive_ 默认为 true。但如果客户端中存在这样的 http header `Connection: close`，则说明当前连接并非**持续性**的，因此处理完当前 http 请求后必须马上断开连接。所以当我们接收到了`Connection: close`这样的http header时，必须设置 isKeepAlive_ 变量为 false。
+
+```c
+HttpHandler::ERROR_TYPE HttpHandler::parseHttpHeader()
+{
+    // 清除之前的 http header
+    headers_.clear();
+
+    size_t pos1, pos2;
+    for(pos1 = pos_;
+        (pos2 = request_.find("\r\n", pos1)) != string::npos;
+        pos1 = pos2 + 2)
+    {
+        string&& header = request_.substr(pos1, pos2 - pos1);
+        // 如果遍历到了空头,则表示http header部分结束
+        if(header.size() == 0)
+            break;
+        pos1 = header.find(' ');
+        if(pos1 == string::npos)    return ERR_BAD_REQUEST;
+        // key处减去1是为了消除key里的最后一个冒号字符
+        string&& key = header.substr(0, pos1 - 1);
+        // key 转小写
+        transform(key.begin(), key.end(), key.begin(), ::tolower);
+        // 获取 value
+        string&& value = header.substr(pos1 + 1);
+
+        LOG(INFO) << "HTTP Header: [" << key << " : " << value << "]" << endl;
+
+        headers_[key] = value;
+    }
+    // 获取header完成后,处理一下 Connection 头
+    auto conHeaderIter = headers_.find("connection");
+    if(conHeaderIter != headers_.end())
+    {
+        string value = conHeaderIter->second;
+        transform(value.begin(), value.end(), value.begin(), ::tolower);
+        if(value != "keep-alive")
+            isKeepAlive_ = false;
+    }
+    // 判断处理空 header 条目的 \r\n
+    if((request_.size() < pos1 + 2) || (request_.substr(pos1, 2) != "\r\n"))
+        return ERR_BAD_REQUEST;
+
+    pos_ = pos1 + 2;
+    return ERR_SUCCESS;
+}
+```
+
+发送响应报文：
+
+```c
+//这里要注意一点，当前连接是否继续保持取决于 isKeepAlive_ 变量。具体实现如下所示：
+HttpHandler::ERROR_TYPE HttpHandler::sendResponse(const string& responseCode, const string& responseMsg, 
+                            const string& responseBodyType, const string& responseBody)
+{
+    stringstream sstream;
+    sstream << "HTTP/1.1" << " " << responseCode << " " << responseMsg << "\r\n";
+    sstream << "Connection: " << (isKeepAlive_ ? "Keep-Alive" : "Close") << "\r\n";
+    sstream << "Server: WebServer/1.0" << "\r\n";
+    sstream << "Content-length: " << responseBody.size() << "\r\n";
+    sstream << "Content-type: " << responseBodyType << "\r\n";
+    sstream << "\r\n";
+    sstream << responseBody;
+
+    string&& response = sstream.str();
+    ssize_t len = writen(client_fd_, (void*)response.c_str(), response.size());
+
+    // 输出返回的数据
+    LOG(INFO) << "<<<<- Response Packet ->>>> " << endl;
+    LOG(INFO) << "{" << escapeStr(response) << "}" << endl;
+
+    if(len < 0 || static_cast<size_t>(len) != response.size())
+        return ERR_SEND_RESPONSE_FAIL;
+    return ERR_SUCCESS;
+}
+```
+
+错误处理：
+
+当 handlerError 错误处理函数被调用时，在该函数内部将简单构建一个 html 错误提示页面，并将该页面发送至远程客户端。具体实现如下所示：
+
+```c
+HttpHandler::ERROR_TYPE HttpHandler::handleError(const string& errCode, const string& errMsg)
+{
+    string errStr = errCode + " " + errMsg;
+    string responseBody = 
+                "<html>"
+                "<title>" + errStr + "</title>"
+                "<body>" + errStr + 
+                    "<hr><em> Kiprey's Web Server</em>"
+                "</body>"
+                "</html>";
+    return sendResponse(errCode, errMsg, "text/html", responseBody);
+}
+```
+
+事件循环：
+
+HttpHandler 中的 RunEventLoop 函数维护了整个连接的事件循环。具体操作如下：
+
+- 首先，由于 HTTP/1.1 协议支持 持续连接，因此控制流将会进入一个 while 循环，循环进行**读取请求并发送响应**这样的过程。
+- while 循环内部中，首先读取来自客户端的数据，之后进行 URI 与 http header 的解析。如果上面中任何一步存在错误，则发送对应的错误页面给客户端，或者退出循环断开连接。
+- 如果上述步骤没有错误，则打开目标文件，将文件数据通过 mmap 函数映射到内存，读取并发送至远程客户端。而如果目标文件不存在，则返回 404 错误；文件映射失败则返回 500 错误。
+- 最后返回 while 循环头部，继续等待新的请求报文。
+
+```c
+void HttpHandler::RunEventLoop()
+{
+    ERROR_TYPE err_ty;
+    LOG(INFO) << "------------------- New Connection -------------------" << endl;
+
+    // 输出连接
+    printConnectionStatus();
+
+    // 持续连接
+    while(isKeepAlive_)
+    {
+        LOG(INFO) << "<<<<- Request Packet ->>>> " << endl;
+        // 从socket读取请求数据, 如果读取失败,或者断开连接
+        // NOTE 这里的 readRequest 必须完整读取整个 http 报文
+        if((err_ty = readRequest()) != ERR_SUCCESS)
+        {
+            if(err_ty == ERR_READ_REQUEST_FAIL)
+                LOG(ERROR) << "Read request failed ! " << strerror(errno) << endl;
+            else if(err_ty == ERR_CONNECTION_CLOSED)
+                LOG(INFO) << "Socket(" << client_fd_ << ") was closed." << endl;
+            else
+                assert(0 && "UNREACHABLE");       
+            // 断开连接     
+            break;
+        }
+        LOG(INFO) << "{" << escapeStr(request_) << "}" << endl;
+        
+        // 解析信息 ------------------------------------------
+        LOG(INFO) << "<<<<- Request Info ->>>> " << endl;
+
+        // 1. 先解析第一行
+        if((err_ty = parseURI()) != ERR_SUCCESS)
+        {
+            if(err_ty == ERR_NOT_IMPLEMENTED)
+            {
+                LOG(ERROR) << "Request method is not implemented." << endl;
+                handleError("501", "Not Implemented");
+            }
+            else if(err_ty == ERR_HTTP_VERSION_NOT_SUPPORTED)
+            {
+                LOG(ERROR) << "Request HTTP Version Not Supported." << endl;
+                handleError("505", "HTTP Version Not Supported");
+            }
+            else if(err_ty == ERR_BAD_REQUEST)
+            {
+                LOG(ERROR) << "Bad Request." << endl;
+                handleError("400", "Bad Request");
+            }
+            else
+                assert(0 && "UNREACHABLE"); 
+            continue;
+        }
+        // 2. 解析每一条http header
+        if((err_ty = parseHttpHeader()) != ERR_SUCCESS)
+        {
+            if(err_ty == ERR_BAD_REQUEST)
+            {
+                LOG(ERROR) << "Bad Request." << endl;
+                handleError("400", "Bad Request");
+            }
+            else
+                assert(0 && "UNREACHABLE"); 
+            continue;
+        }
+        // 3. 输出剩余的 HTTP body
+        LOG(INFO) << "HTTP Body: {" 
+                << escapeStr(request_.substr(pos_, request_.length() - pos_)) 
+                << "}" << endl;
+
+        // 发送目标数据 ------------------------------------------
+
+        // 试图打开一个文件
+        int file_fd;
+        if((file_fd = open(path_.c_str(), O_RDONLY, 0)) == -1)
+        {
+            // 如果打开失败,则返回404
+            LOG(ERROR) << "File [" << path_ << "] open failed ! " << strerror(errno) << endl;
+            handleError("404", "Not Found"); 
+            continue;
+        }  
+        else
+        {
+            // 获取目标文件的大小
+            struct stat st;
+            if(stat(path_.c_str(), &st) == -1)
+            {
+                LOG(ERROR) << "Can not get file [" << path_ << "] state ! " << endl;
+                handleError("500", "Internal Server Error");
+                continue;
+            }
+            // 读取文件, 使用 mmap 来高速读取文件
+            void* addr = mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, file_fd, 0);
+            // 记得关闭文件描述符
+            close(file_fd); 
+            // 异常处理
+            if(addr == MAP_FAILED)
+            {
+                LOG(ERROR) << "Can not map file [" << path_ << "] -> mem ! " << endl;
+                handleError("500", "Internal Server Error");
+                continue;
+            }
+            // 将数据从内存页存入至 responseBody
+            char* file_data_ptr = static_cast<char*>(addr);
+            string responseBody(file_data_ptr, file_data_ptr + st.st_size);
+            // 记得删除内存
+            int res = munmap(addr, st.st_size);
+            if(res == -1)
+                LOG(ERROR) << "Can not unmap file [" << path_ << "] <-> mem ! " << endl;
+            // 获取 Content-type
+            string suffix = path_;
+            // 通过循环找到最后一个 dot
+            size_t dot_pos;
+            while((dot_pos = suffix.find('.')) != string::npos)
+                suffix = suffix.substr(dot_pos + 1);
+
+            // 发送数据
+            if(sendResponse("200", "OK", MimeType::getMineType(suffix), responseBody) != ERR_SUCCESS)
+                LOG(ERROR) << "Send Response failed !" << endl;
+        }
+    }
+    LOG(INFO) << "------------------ Connection Closed ------------------" << endl;
+}
+```
+
