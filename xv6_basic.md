@@ -1209,3 +1209,709 @@ void P(struct semaphore *s){
 ```
 
 P 持有 s->lock 的事实阻止了 V 在 P 检查 c->count 和调用睡眠之间尝试唤醒它。 但是请注意，我们需要 sleep 以原子方式释放 s->lock 并将消费进程置于睡眠状态，以避免丢失唤醒。
+
+7.6 cde : sleep and wakeup
+
+xv6的sleep（kernel/proc.c:529）和wakeup（kernel/proc.c:560）提供了上面最后一个例子所示的接口，它们的实现（加上如何使用它们的规则）确保不会丢失 唤醒。 基本思路是让sleep将当前进程标记为SLEEPING，然后调用sched释放CPU； wakeup 查找在给定等待通道上休眠的进程并将其标记为 RUNNABLE。 sleep 和 wakeup 的调用者可以使用任何一个双方都方便的号码作为通道。 xv6 经常使用涉及等待的内核数据结构的地址。
+
+```c
+void sleep(void *chan, struct spinlock *lk)
+{
+    struct proc *p = myproc();
+    acquire(&p ->lock);
+    release(lk);
+    p -> chan = chan;
+    p -> state = SLEEPING;
+    sched();
+    p -> chan = 0;
+    release(&p -> lock);
+    acquire(lk);
+}
+
+void wakeup(void *chan)
+{
+    struct proc *p;
+    for(p = proc; p < &proc[NPROC]; p ++){
+        if(p != myproc()){
+            acquire(&p -> lock);
+            if(p -> state == SLEEPING && p -> chan == chan){
+                p -> state = RUNNING;
+            }
+            release(&p -> lock);
+        }
+    }
+}
+```
+
+睡眠获取 p->lock (kernel/proc.c:540)。 现在进入睡眠状态的进程持有 p->lock 和 lk。 持有 lk 在调用者中是必要的（在示例中，P）：它确保没有其他进程（在示例中，一个正在运行的 V）可以启动对 wakeup(chan) 的调用。 现在 sleep 持有 p->lock，释放 lk 是安全的：一些其他进程可能开始调用 wakeup(chan)，但 wakeup 将等待获取 p->lock，因此将等到 sleep 完成放置 进入睡眠过程，防止唤醒错过睡眠。
+
+现在 sleep 持有 p->lock 而没有其他，它可以通过记录睡眠通道、将进程状态更改为 SLEEPING 并调用 sched (kernel/proc.c:544-547) 来使进程进入睡眠状态。稍后就会清楚为什么在进程被标记为 SLEEPING 之前不释放 p->lock 是至关重要的（由调度程序）。
+
+在某个时候，进程将获取条件锁，设置睡眠者正在等待的条件，并调用 wakeup(chan)。 在保持条件 lock1 时调用 wakeup 很重要。 唤醒循环遍历进程表 (kernel/proc.c:560)。 它获取它检查的每个进程的 p->lock，这既是因为它可以操纵该进程的状态，也是因为 p->lock 确保 sleep 和 wakeup 不会错过彼此。 当 wakeup 发现进程处于 SLEEPING 状态并具有匹配的 chan 时，它会将进程的状态更改为 RUNNABLE。 下次调度程序运行时，它将看到该进程已准备好运行。
+
+为什么睡眠和唤醒的锁定规则确保睡眠过程不会错过唤醒？ 休眠进程持有条件锁或它自己的 p->lock 或两者，从它检查条件之前的一个点到它被标记为 SLEEPING 之后的一个点。 调用 wakeup 的进程在 wakeup 的循环中持有这两个锁。 因此，唤醒者要么在消费线程检查条件之前使条件为真；要么 或者唤醒者的唤醒在标记为 SLEEPING 后严格检查睡眠线程。 然后 wakeup 会看到睡眠过程并将其唤醒（除非有其他东西先唤醒它）。
+
+有时会出现多个进程在同一个通道上休眠的情况； 例如，多个进程从管道读取。 一次调用 wakeup 就会把它们全部唤醒。 其中一个将首先运行并获取调用 sleep 时使用的锁，并且（在管道的情况下）读取管道中等待的任何数据。 其他进程会发现，虽然被唤醒了，但是没有数据可读。 从他们的角度来看，唤醒是“虚假的”，他们必须再次入睡。 出于这个原因，睡眠总是在检查条件的循环内调用。
+
+如果 sleep/wakeup 的两次使用不小心选择了同一个频道，也没有什么坏处：他们会看到虚假的唤醒，但是如上所述的循环可以容忍这个问题。 睡眠/唤醒的大部分魅力在于它既轻量（无需创建特殊数据结构来充当睡眠通道）又提供了一个间接层（调用者无需知道他们正在与哪个特定进程交互）。
+
+7.7 code:pipes
+
+一个更复杂的使用睡眠和唤醒来同步生产者和消费者的例子是 xv6 的管道实现。 我们在第 1 章中看到了管道接口：写入管道一端的字节被复制到内核缓冲区，然后可以从管道的另一端读取。 以后的章节将研究围绕管道的文件描述符支持，但现在让我们看一下 pipewrite 和 piperead 的实现。
+
+```c
+int pipewrite(struct pipe *pi, uint64 addr, int n)
+{
+  int i = 0;
+  struct proc *pr = myproc();
+
+  acquire(&pi->lock);
+  while(i < n){
+    if(pi->readopen == 0 || pr->killed){
+      release(&pi->lock);
+      return -1;
+    }
+    if(pi->nwrite == pi->nread + PIPESIZE){ //DOC: pipewrite-full
+      wakeup(&pi->nread);
+      sleep(&pi->nwrite, &pi->lock);
+    } else {
+      char ch;
+      if(copyin(pr->pagetable, &ch, addr + i, 1) == -1)
+        break;
+      pi->data[pi->nwrite++ % PIPESIZE] = ch;
+      i++;
+    }
+  }
+  wakeup(&pi->nread);
+  release(&pi->lock);
+
+  return i;
+}
+
+int piperead(struct pipe *pi, uint64 addr, int n)
+{
+  int i;
+  struct proc *pr = myproc();
+  char ch;
+
+  acquire(&pi->lock);
+  while(pi->nread == pi->nwrite && pi->writeopen){  //DOC: pipe-empty
+    if(pr->killed){
+      release(&pi->lock);
+      return -1;
+    }
+    sleep(&pi->nread, &pi->lock); //DOC: piperead-sleep
+  }
+  for(i = 0; i < n; i++){  //DOC: piperead-copy
+    if(pi->nread == pi->nwrite)
+      break;
+    ch = pi->data[pi->nread++ % PIPESIZE];
+    if(copyout(pr->pagetable, addr + i, &ch, 1) == -1)
+      break;
+  }
+  wakeup(&pi->nwrite);  //DOC: piperead-wakeup
+  release(&pi->lock);
+  return i;
+}
+```
+
+每个管道都由一个结构管道表示，其中包含一个锁和一个数据缓冲区。 nread 和 nwrite 字段计算从缓冲区读取和写入缓冲区的字节总数。 缓冲区环绕：在 buf[PIPESIZE-1] 之后写入的下一个字节是 buf[0]。 计数不换行。 这个约定让实现区分一个完整的缓冲区（nwrite == nread+PIPESIZE）和一个空缓冲区（nwrite == nread），但这意味着索引到缓冲区必须使用 buf[nread % PIPESIZE] 而不仅仅是 buf[nread ]（对于 nwrite 也是如此）。
+
+假设对 piperead 和 pipewrite 的调用同时发生在两个不同的 CPU 上。 Pipewrite (kernel/pipe.c:77) 首先获取管道的锁，它保护计数、数据及其相关的不变量。 Piperead (kernel/pipe.c:106) 然后也尝试获取锁，但不能。 它在 acquire (kernel/spinlock.c:22) 中自旋等待锁。 在 piperead 等待的同时，pipewrite 遍历正在写入的字节 (addr[0..n-1])，依次将每个字节添加到管道 (kernel/pipe.c:95)。 在此循环期间，缓冲区可能会填满 (kernel/pipe.c:88)。 在这种情况下，pipewrite 调用 wakeup 来提醒所有睡眠中的读者缓冲区中有数据在等待，然后在 &pi->nwrite 上休眠以等待读者从缓冲区中取出一些字节。 Sleep 释放 pi->lock 作为使 pipewrite 进程进入睡眠的一部分。
+
+现在 pi->lock 可用，piperead 设法获取它并进入其临界区：它发现 pi->nread != pi->nwrite (kernel/pipe.c:113) (pipewrite 进入休眠状态，因为 pi- >nwrite == pi->nread+PIPESIZE (kernel/pipe.c:88)), 所以它落入 for
+循环，将数据复制出管道 (kernel/pipe.c:120)，然后将 nread 增加复制的字节数。 现在有那么多字节可用于写入，因此 piperead 调用 wakeup (kernel/pipe.c:127) 以在它返回之前唤醒任何休眠的写入器。 `wakeup`发现一个进程在 &pi->nwrite 上休眠，该进程正在运行 pipewrite 但在缓冲区已满时停止。 它将该进程标记为RUNNABLE。
+
+管道代码为读取器和写入器使用单独的睡眠通道（pi->nread 和 pi->nwrite）； 这可能会使系统在有许多读者和作者等待同一个管道的不太可能发生的情况下更有效率。 管道代码在检查睡眠条件的循环中睡眠； 如果有多个读者或作者，除了第一个醒来的进程之外的所有进程都会看到条件仍然为假并再次睡眠。
+
+7.8 code : wait, exit, and kill
+
+sleep和wakeup可以用于多种等待。 第 1 章中介绍的一个有趣的例子是子进程的exit与其父进程的wait之间的交互。 子进程死亡，父进程可能正在wait，或者可能正在做其他事情； 在后一种情况下，随后的 wait 调用必须观察到子进程的死亡，也许在它调用 exit 很久之后。 xv6 记录子进程死亡直到 wait 观察到它的方式是 exit 将调用者置于 ZOMBIE 状态，它会一直停留直到父进程的 wait 注意到它，将子进程的状态更改为 UNUSED，复制子进程的退出状态，并返回子进程ID给父进程。 如果父进程先于子进程退出，则父进程将子进程交给 init 进程，该进程会一直调用 wait； 因此每个子进程都有一个父进程来清理它。 一个挑战是避免同时父子进程等待和退出以及同时退出和退出之间的竞争和死锁。
+
+```c
+// Wait for a child process to exit and return its pid.
+// Return -1 if this process has no children.
+int wait(uint64 addr)
+{
+  struct proc *np;
+  int havekids, pid;
+  struct proc *p = myproc();
+
+  acquire(&wait_lock);
+
+  for(;;){
+    // Scan through table looking for exited children.
+    havekids = 0;
+    for(np = proc; np < &proc[NPROC]; np++){
+      if(np->parent == p){
+        // make sure the child isn't still in exit() or swtch().
+        acquire(&np->lock);
+
+        havekids = 1;
+        if(np->state == ZOMBIE){
+          // Found one.
+          pid = np->pid;
+          if(addr != 0 && copyout(p->pagetable, addr, (char *)&np->xstate,
+                                  sizeof(np->xstate)) < 0) {
+            release(&np->lock);
+            release(&wait_lock);
+            return -1;
+          }
+          freeproc(np);
+          release(&np->lock);
+          release(&wait_lock);
+          return pid;
+        }
+        release(&np->lock);
+      }
+    }
+
+    // No point waiting if we don't have any children.
+    if(!havekids || p->killed){
+      release(&wait_lock);
+      return -1;
+    }
+    
+    // Wait for a child to exit.
+    sleep(p, &wait_lock);  //DOC: wait-sleep
+  }
+}
+
+
+// Exit the current process.  Does not return.
+// An exited process remains in the zombie state
+// until its parent calls wait().
+void exit(int status)
+{
+  struct proc *p = myproc();
+
+  if(p == initproc)
+    panic("init exiting");
+
+  // Close all open files.
+  for(int fd = 0; fd < NOFILE; fd++){
+    if(p->ofile[fd]){
+      struct file *f = p->ofile[fd];
+      fileclose(f);
+      p->ofile[fd] = 0;
+    }
+  }
+
+  begin_op();
+  iput(p->cwd);
+  end_op();
+  p->cwd = 0;
+
+  acquire(&wait_lock);
+
+  // Give any children to init.
+  reparent(p);
+
+  // Parent might be sleeping in wait().
+  wakeup(p->parent);
+  
+  acquire(&p->lock);
+
+  p->xstate = status;
+  p->state = ZOMBIE;
+
+  release(&wait_lock);
+
+  // Jump into the scheduler, never to return.
+  sched();
+  panic("zombie exit");
+}
+
+
+// Kill the process with the given pid.
+// The victim won't exit until it tries to return
+// to user space (see usertrap() in trap.c).
+int
+kill(int pid)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->pid == pid){
+      p->killed = 1;
+      if(p->state == SLEEPING){
+        // Wake process from sleep().
+        p->state = RUNNABLE;
+      }
+      release(&p->lock);
+      return 0;
+    }
+    release(&p->lock);
+  }
+  return -1;
+}
+```
+
+wait通过获取 wait_lock (kernel/proc.c:384) 开始。 原因是 wait_lock 充当条件锁，有助于确保父级不会错过退出的子级的唤醒。然后等待扫描进程表。 如果它找到处于 ZOMBIE 状态的子进程，它会释放该子进程的资源及其 proc 结构，将子进程的退出状态复制到提供给 wait 的地址（如果它不为 0），并返回子进程的进程 ID。 如果 wait 找到孩子但没有一个退出，它会调用 sleep 等待他们中的任何一个退出（kernel/proc.c:426），然后再次扫描。 wait经常持有两把锁，wait_lock和某个进程的np->lock； 避免死锁的顺序首先是 wait_lock 和然后np->lock。
+
+exit (kernel/proc.c:340) 记录退出状态，释放一些资源，调用reparent将其子进程交给init进程，唤醒等待中的父进程，将调用者标记为zombie，并永久产生 CPU。 exit 在此序列中同时持有 wait_lock 和 p->lock。 它持有 wait_lock 因为它是 wakeup(p->parent) 的条件锁，防止等待中的父进程失去唤醒。 exit 也必须为这个序列保持 p->lock，以防止等待中的父进程在子进程最终调用 swtch 之前看到子进程处于 ZOMBIE 状态。 Exit 以与 wait 相同的顺序获取这些锁以避免死锁。
+
+exit 在将其状态设置为 ZOMBIE 之前唤醒父级可能看起来不正确，但这是安全的：虽然唤醒可能导致父级运行，但等待中的循环无法检查子级，直到子级的 p->lock 被释放 调度程序，所以 wait 不能查看退出进程，直到 exit 将其状态设置为 ZOMBIE (kernel/proc.c:372)。
+
+exit 允许进程自行终止，而 kill (kernel/proc.c:579) 允许一个进程请求另一个进程终止。 kill 直接销毁受害进程太复杂了，因为受害进程可能正在另一个 CPU 上执行，也许是在对内核数据结构进行一系列敏感更新的过程中。 因此 kill 做的很少：它只是设置受害者的 p->killed 并且，如果它正在睡觉，将其唤醒。 最终受害者将进入或离开内核，此时如果设置了 p->killed，usertrap 中的代码将调用 exit。 如果受害者在用户空间运行，它很快就会通过系统调用或因为定时器（或其他一些设备）中断而进入内核。
+
+如果受害者进程处于睡眠状态，kill 调用 wakeup 将使受害者从睡眠中返回。 这是潜在的危险，因为正在等待的条件可能不正确。然而，xv6 对 sleep 的调用总是包含在 while 循环中，在 sleep 返回后重新测试条件。 一些对 sleep 的调用也在循环中测试 p->killed ，如果设置了则放弃当前活动。 只有在这种放弃是正确的情况下才会这样做。 例如，如果设置了 killed 标志，则管道读写代码返回； 最终代码将返回到 trap，这将再次检查 p->killed 并退出。
+
+一些 xv6 睡眠循环不检查 p->killed，因为代码处于一个应该是原子的多步系统调用的中间。 virtio 驱动程序 (kernel/virtio_disk.c:273) 就是一个例子：它不检查 p->killed，因为磁盘操作可能是一组写入操作中的一个，这些操作都是为了将文件系统留在 一个正确的状态。 在等待磁盘 I/O 时被杀死的进程将不会退出，直到它完成当前系统调用并且 usertrap 看到 killed 标志。
+
+7.9 process locking
+
+每个进程关联的锁（p->lock）是xv6中最复杂的锁。 考虑 p->lock 的一种简单方法是，在读取或写入以下任何 struct proc 字段时必须持有它：p >state、p->chan、p->killed、p->xstate 和 p- >pid。 这些字段可以被其他进程使用，或者被其他内核上的调度程序线程使用，所以很自然地必须用锁来保护它们。
+
+但是，p->lock 的大多数用途是保护 xv6 进程数据结构和算法的更高级别方面。 下面是 p->lock 做的全部事情：
+
+* 与 p->state 一起，它可以防止在为新进程分配 proc[] 时发生竞争。
+* 它在进程创建或销毁时将进程隐藏起来。
+* 它防止父等待收集已将其状态设置为 ZOMBIE 但尚未让出 CPU 的进程。
+* 它阻止另一个核心的调度程序在将其状态设置为 RUNNABLE 之后但在完成 swtch 之前决定运行一个让步进程。
+* 它确保只有一个内核的调度程序决定运行一个 RUNNABLE 进程。
+*  它防止计时器中断导致进程在处于swtch 时产生。
+* 与条件锁一起，它有助于防止唤醒忽略正在调用睡眠但尚未完成让出CPU 的进程。
+* 它防止 kill 的受害者进程退出，并可能在 kill 检查 p->pid 和设置 p->killed 之间重新分配。
+* 它使 kill 对 p->state 的检查和写入成为原子操作。
+
+p->parent 字段由全局锁 wait_lock 保护，而不是由 p->lock 保护。 只有进程的父进程修改 p->parent，尽管该字段由进程本身和其他搜索其子进程的进程读取。wait_lock 的目的是在 wait 休眠等待任何子进程退出时充当条件锁。 一个退出的子进程持有 wait_lock 或 p->lock 直到它把它的状态设置为 ZOMBIE，唤醒它的父进程，并让出 CPU。 wait_lock 还序列化父进程和子进程的并发退出，以便保证 init 进程（继承子进程）从等待中唤醒。 wait_lock 是全局锁而不是每个父进程中的每个进程锁，因为在进程获取它之前，它无法知道其父进程是谁。
+
+7.10 real world
+
+xv6采用的scheduling的方式为*round robin*，即每个进程轮流运行，实际的操作系统的scheduling可以让进程有优先级。当高优先级和低优先级共享一个锁而低优先级拿到这个锁的情况下，将产生*priority inversion*，将导致大量高优先级进程等候低优先级进程，从而形成*convoy*。
+
+对整个进程列表查找睡眠在`chan`上的进程是非常低效的，更好的解决方案是将`chan`替代为一个可以存储睡眠在此结构体上的进程列表的结构体，比如Linux的*wait queue*
+
+xv6中的`wakeup`唤醒所有睡在`chan`上的进程，然后这些进程将竞争检查sleep conditoin，这种情况通常需要被避免。许多是采用`signal`和`broadcast`两种唤醒模式，前面一种只唤醒一个进程，后面一种唤醒所有进程。
+
+8. file system
+
+文件系统的目的是组织和存储数据。 文件系统通常支持在用户和应用程序之间共享数据以及持久性，以便数据在重启后仍然可用。xv6 文件系统提供类 Unix 文件、目录和路径名（参见第 1 章），并将其数据存储在 virtio 磁盘上以实现持久性。 文件系统解决了几个挑战：
+
+* 文件系统需要磁盘上的数据结构来表示命名目录和文件的树，记录保存每个文件内容的块的身份，并记录磁盘的哪些区域是空闲的。
+* 文件系统必须支持崩溃恢复。 也就是说，如果发生崩溃（例如，电源故障），文件系统必须在重新启动后仍能正常工作。 风险在于崩溃可能会中断一系列更新并留下不一致的磁盘数据结构（例如，一个块既在文件中使用又标记为空闲）。
+* 不同的进程可能同时对文件系统进行操作，因此文件系统代码必须协调以保持不变量。
+* 访问磁盘比访问内存慢几个数量级，因此文件系统必须维护流行块的内存缓存。
+
+8.1 overview
+
+xv6 文件系统实现分为七层，如图 8.1 所示。 磁盘层在 virtio 硬盘驱动器上读取和写入块。 缓冲区缓存层缓存磁盘块并同步访问它们，确保一次只有一个内核进程可以修改存储在任何特定块中的数据。 日志层允许更高层将更新包装到事务中的多个块，并确保块在面对崩溃时自动更新（即，所有块都被更新或没有）。 inode 层提供单独的文件，每个文件都表示为具有唯一 i-number 的 inode 和一些保存文件数据的块。 目录层将每个目录实现为一种特殊类型的 inode，其内容是一系列目录条目，每个目录条目包含一个文件名和 i-number。 路径名层提供分层路径名，如/usr/rtm/xv6/fs.c，并通过递归查找来解析它们。 文件描述符层使用文件系统接口抽象出许多 Unix 资源（例如，管道、设备、文件等），简化了应用程序程序员的工作。
+
+<img src="G:\typora_image_store\image-20230109144909121.png" alt="image-20230109144909121" style="zoom:80%;" />
+
+磁盘硬件传统上将磁盘上的数据表示为 512 字节块（也称为扇区）的编号序列：扇区 0 是前 512 字节，扇区 1 是下一个，依此类推。 操作系统用于其文件系统的块大小可能与磁盘使用的扇区大小不同，但通常块大小是扇区大小的倍数。 Xv6 在 struct buf (kernel/buf.h:1) 类型的对象中保存已读入内存的块的副本。 存储在该结构中的数据有时与磁盘不同步：它可能尚未从磁盘读入（磁盘正在处理它但尚未返回扇区的内容），或者它可能已被更新 软件但尚未写入磁盘。
+
+文件系统必须有一个在磁盘上存储 inode 和内容块的计划。 为此，xv6 将磁盘分成几个部分，如图 8.2 所示。 文件系统不使用块 0（它包含引导扇区）。 块 1 称为超级块； 它包含有关文件系统的元数据（以块为单位的文件系统大小、数据块数、inode 数和日志中的块数）。 从 2 开始的块保存日志。 日志之后是索引节点，每个块有多个索引节点。 在那些之后是位图块跟踪正在使用的数据块。 其余块为数据块； 每个都在位图块中标记为空闲，或者
+保存文件或目录的内容。 超级块由一个名为 mkfs 的单独程序填充，该程序构建一个初始文件系统。
+
+<img src="G:\typora_image_store\image-20230109145054693.png" alt="image-20230109145054693" style="zoom:80%;" />
+
+8.2 buffer cache layer
+
+缓冲区缓存有两个工作：（1）同步对磁盘块的访问，以确保内存中只有一个块的副本，并且一次只有一个内核线程使用该副本； (2) 缓存流行的块，这样它们就不需要从慢盘中重新读取。 代码在 bio.c 中。
+buffer cache导出的主要接口由bread和bwrite组成； 前者获得一个包含可在内存中读取或修改的块副本的 buf，后者将修改后的缓冲区写入磁盘上的相应块。 内核线程在使用完缓冲区后必须通过调用 brelse 来释放缓冲区。 缓冲区缓存使用每个缓冲区的睡眠锁来确保一次只有一个线程使用每个缓冲区（以及每个磁盘块）； bread 返回一个锁定的缓冲区，brelse 释放锁。
+让我们回到缓冲区缓存。 缓冲区缓存有固定数量的缓冲区来保存磁盘块，这意味着如果文件系统请求缓存中不存在的块，缓冲区缓存必须回收当前保存其他块的缓冲区。 缓冲区缓存为新块回收最近最少使用的缓冲区。 假设最近最少使用的缓冲区是最不可能很快再次使用的缓冲区。
+
+8.3 code: buffer cache
+
+缓冲区高速缓存是缓冲区的双向链表。 由 main (kernel/- main.c:27) 调用的函数 binit 使用静态数组 buf (kernel/bio.c:43-52) 中的 NBUF 缓冲区初始化列表。 所有其他对缓冲区缓存的访问都通过 bcache.head 引用链表，而不是 buf 数组。
+
+```c
+void
+binit(void)
+{
+  struct buf *b;
+
+  initlock(&bcache.lock, "bcache");
+
+  // Create linked list of buffers
+  bcache.head.prev = &bcache.head;
+  bcache.head.next = &bcache.head;
+  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
+    b->next = bcache.head.next;
+    b->prev = &bcache.head;
+    initsleeplock(&b->lock, "buffer");
+    bcache.head.next->prev = b;
+    bcache.head.next = b;
+  }
+}
+```
+
+缓冲区有两个与之关联的状态字段。 字段 valid 指示缓冲区包含块的副本。 field disk表示缓冲区内容已经交给
+磁盘，这可能会改变缓冲区（例如，将数据从磁盘写入数据）。
+Bread (kernel/bio.c:93) 调用 bget 以获取给定扇区 (kernel/bio.c:97) 的缓冲区。 如果需要从磁盘读取缓冲区，bread 会在返回缓冲区之前调用 virtio_disk_rw 来执行此操作。
+Bget (kernel/bio.c:59) 扫描缓冲区列表以查找具有给定设备和扇区号 (kernel/bio.c:65-73) 的缓冲区。 如果存在这样的缓冲区，则 bget 获取缓冲区的睡眠锁。 然后 Bget 返回锁定的缓冲区。
+
+```c
+// Return a locked buf with the contents of the indicated block.
+struct buf*
+bread(uint dev, uint blockno)
+{
+  struct buf *b;
+
+  b = bget(dev, blockno);
+  if(!b->valid) {
+    virtio_disk_rw(b, 0);
+    b->valid = 1;
+  }
+  return b;
+}
+```
+
+如果给定扇区没有缓存缓冲区，则 bget 必须创建一个，可能会重新使用包含不同扇区的缓冲区。它第二次扫描缓冲区列表，寻找未使用的缓冲区 (b->refcnt = 0)； 可以使用任何此类缓冲区。 Bget 编辑缓冲区元数据以记录新设备和扇区号并获取其睡眠锁。 请注意，赋值 b->valid = 0 确保 bread 将从磁盘读取块数据，而不是错误地使用缓冲区的先前内容。
+
+重要的是每个磁盘扇区最多有一个缓存缓冲区，以确保读者看到写入，并且因为文件系统使用缓冲区上的锁来进行同步。
+
+Bget 通过从第一个循环检查块是否被缓存到第二个循环声明块现在被缓存（通过设置 dev、blockno 和refcnt）连续持有 bache.lock 来确保这种不变性。 这导致检查块的存在和（如果不存在）缓冲区的指定以保持块是原子的。
+
+```c
+// Look through buffer cache for block on device dev.
+// If not found, allocate a buffer.
+// In either case, return locked buffer.
+static struct buf*
+bget(uint dev, uint blockno)
+{
+  struct buf *b;
+
+  acquire(&bcache.lock);
+
+  // Is the block already cached?
+  for(b = bcache.head.next; b != &bcache.head; b = b->next){
+    if(b->dev == dev && b->blockno == blockno){
+      b->refcnt++;
+      release(&bcache.lock);
+      acquiresleep(&b->lock);
+      return b;
+    }
+  }
+
+  // Not cached.
+  // Recycle the least recently used (LRU) unused buffer.
+  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
+    if(b->refcnt == 0) {
+      b->dev = dev;
+      b->blockno = blockno;
+      b->valid = 0;
+      b->refcnt = 1;
+      release(&bcache.lock);
+      acquiresleep(&b->lock);
+      return b;
+    }
+  }
+  panic("bget: no buffers");
+}
+```
+
+bget 在 bcache.lock 关键部分之外获取缓冲区的睡眠锁是安全的，因为非零 b->refcnt 防止缓冲区被重新用于不同的磁盘块。 睡眠锁保护块缓冲内容的读写，而bcache.lock 保护有关哪些块被缓存的信息。
+如果所有的缓冲区都忙，那么太多进程同时执行文件系统调用； 恐慌。 一个更优雅的响应可能是休眠直到缓冲区空闲，尽管这样可能会出现死锁。
+
+```c
+// Write b's contents to disk.  Must be locked.
+void
+bwrite(struct buf *b)
+{
+  if(!holdingsleep(&b->lock))
+    panic("bwrite");
+  virtio_disk_rw(b, 1);
+}
+```
+
+一旦 bread 读取了磁盘（如果需要）并将缓冲区返回给它的调用者，调用者就可以独占使用缓冲区并且可以读取或写入数据字节。 如果调用者确实修改了缓冲区，它必须在释放缓冲区之前调用 bwrite 将更改的数据写入磁盘。 写入(kernel/bio.c:107) 调用 virtio_disk_rw 与磁盘硬件对话。
+当调用者用完一个缓冲区时，它必须调用 brelse 来释放它。 （名称 brelse 是 b-release 的缩写，含糊不清但值得学习：它起源于 Unix，也用于 BSD、Linux 和 Solaris。）Brelse (kernel/bio.c:117) 释放睡眠锁 并将缓冲区移动到链表的前面 (kernel/bio.c:128-133)。 移动缓冲区会导致列表按最近使用缓冲区的时间（意味着已释放）排序：列表中的第一个缓冲区是最近使用的，最后一个是最近最少使用的。 bget 中的两个循环利用了这一点：扫描现有缓冲区必须在最坏的情况下处理整个列表，但首先检查最近使用的缓冲区（从 bcache.head 开始并跟随下一个指针）将减少扫描时间 有很好的参考资料。 选择缓冲区以重用的扫描通过向后扫描（跟随 prev 指针）选择最近最少使用的缓冲区。
+
+```c
+// Release a locked buffer.
+// Move to the head of the most-recently-used list.
+void
+brelse(struct buf *b)
+{
+  if(!holdingsleep(&b->lock))
+    panic("brelse");
+
+  releasesleep(&b->lock);
+
+  acquire(&bcache.lock);
+  b->refcnt--;
+  if (b->refcnt == 0) {
+    // no one is waiting for it.
+    b->next->prev = b->prev;
+    b->prev->next = b->next;
+    b->next = bcache.head.next;
+    b->prev = &bcache.head;
+    bcache.head.next->prev = b;
+    bcache.head.next = b;
+  }
+  
+  release(&bcache.lock);
+}
+```
+
+8.4 logging layer
+
+文件系统设计中最有趣的问题之一是崩溃恢复。 问题的出现是因为许多文件系统操作涉及对磁盘的多次写入，并且在一部分写入后崩溃可能会使磁盘上的文件系统处于不一致的状态。 例如，假设在文件截断期间发生崩溃（将文件的长度设置为零并释放其内容块）。 根据磁盘写入的顺序，崩溃可能会留下一个索引节点引用标记为空闲的内容块，或者它可能会留下一个已分配但未引用的内容块。
+
+后者相对良性，但引用释放块的 inode 很可能在重启后导致严重问题。 重启后，内核可能会将该块分配给另一个文件，现在我们有两个不同的文件无意中指向同一个块。 如果 xv6 支持多用户，这种情况可能是一个安全问题，因为旧文件的所有者将能够读取和写入新文件中的块，新文件由不同的用户拥有。
+
+xv6 使用简单的日志记录形式解决了文件系统操作期间的崩溃问题。 xv6 系统调用不直接写入磁盘文件系统数据结构。 相反，它会在磁盘上的日志中放置它希望进行的所有磁盘写入的描述。 一旦系统调用记录了它的所有写入，它就会向磁盘写入一条特殊的提交记录，表明该日志包含一个完整的操作。 那时系统调用将写入复制到磁盘文件系统数据结构。 这些写入完成后，系统调用将擦除磁盘上的日志。
+
+如果系统崩溃并重新启动，文件系统代码会在运行任何进程之前按如下方式从崩溃中恢复。 如果日志被标记为包含一个完整的操作，那么恢复代码会将写入复制到磁盘文件系统中它们所属的位置。 如果日志未标记为包含完整操作，恢复代码将忽略该日志。 恢复代码通过擦除日志完成。
+
+为什么xv6的log解决文件系统操作时崩溃的问题？ 如果崩溃发生在操作提交之前，那么磁盘上的日志将不会被标记为完整，恢复代码将忽略它，磁盘的状态就好像操作还没有开始一样。 如果崩溃发生在操作提交之后，那么恢复将重放操作的所有写入，如果操作已经开始将它们写入磁盘数据结构，则可能会重复它们。 在任何一种情况下，日志都使操作相对于崩溃具有原子性：恢复后，所有操作的写入都出现在磁盘上，或者都不出现。
+
+8.5 log design
+
+日志驻留在已知的固定位置，在超级块中指定。 它由一个标头块和一系列更新的块副本（“记录的块”）组成。 标头块包含一组扇区号，每个记录块一个，以及日志块的计数。 磁盘头块中的计数为零，表示日志中没有事务，或者为非零，表示日志包含一个完整的已提交事务，并具有指定数量的记录块。 Xv6 在事务提交时写入标头块，而不是之前，并在将记录的块复制到文件系统后将计数设置为零。 因此，交易中途的崩溃将导致日志头块中的计数为零； 提交后的崩溃将导致非零计数。
+每个系统调用的代码都指示写入序列的开始和结束，这些写入序列对于崩溃而言必须是原子的。 为了允许不同进程并发执行文件系统操作，日志系统可以将多个系统调用的写入累积到一个事务中。 因此，单个提交可能涉及多个完整系统调用的写入。 为了避免跨事务拆分系统调用，日志系统仅在没有文件系统调用正在进行时才提交。
+
+一起提交多个事务的想法称为组提交。组提交减少了磁盘操作的数量，因为它将一次提交的固定成本分摊到多个操作中。 组提交还同时为磁盘系统提供更多并发写入，也许允许磁盘在单个磁盘旋转期间将它们全部写入。 xv6 的 virtio 驱动不支持这种批处理，但 xv6 的文件系统设计允许。
+
+xv6 在磁盘上专门分配了固定数量的空间来保存日志。 事务中系统调用写入的块总数必须适合该空间。 这有两个后果。不允许单个系统调用写入比日志中的空间更多的不同块。 对于大多数系统调用来说这不是问题，但是其中两个可能会写入许多块：write 和 unlink。一次大文件写入可能会写入很多数据块和很多位图块以及一个inode块； 取消链接一个大文件可能会写入许多位图块和一个索引节点。 Xv6 的 write 系统调用将大型写入分解为适合日志的多个较小的写入，并取消链接不会引起问题，因为实际上 xv6 文件系统只使用一个位图块。 日志空间有限的另一个后果是日志系统不允许系统调用启动，除非可以确定系统调用的写入将适合日志中剩余的空间。
+
+8.6 code : logging
+
+系统调用中日志的典型用法如下所示：begin_op (kernel/log.c:127) 等待直到日志系统当前未提交，并且直到有足够的未保留日志空间来保存来自该调用的写入。 log.outstanding 统计已保留日志空间的系统调用数； 总保留空间是 log.outstanding 乘以 MAXOPBLOCKS。 增加 log.outstanding 既可以保留空间又可以防止在此系统调用期间发生提交。 代码保守地假设每个系统调用最多可以写入 MAXOPBLOCKS 个不同的块.
+
+```c
+begin_op();
+...
+bp = bread(...);
+bp -> data[...] = ...;
+log_write(bp);
+...
+end_op();
+```
+
+系统调用中日志的典型用法如下所示：begin_op (kernel/log.c:127) 等待直到日志系统当前未提交，并且直到有足够的未保留日志空间来保存来自该调用的写入。 log.outstanding 统计已保留日志空间的系统调用数； 总保留空间是 log.outstanding 乘以 MAXOPBLOCKS。 增加 log.outstanding 既可以保留空间又可以防止在此系统调用期间发生提交。 代码保守地假设每个系统调用最多可以写入 MAXOPBLOCKS 个不同的块
+
+log_write (kernel/log.c:215) 充当 bwrite 的代理。 它在内存中记录块的扇区号，在磁盘上的日志中为其保留一个槽，并将缓冲区固定在块缓存中以防止块缓存将其驱逐。 该块必须保留在缓存中直到提交：在此之前，缓存的副本是修改的唯一记录； 在提交之后才能将其写入磁盘上的位置； 并且同一事务中的其他读取必须看到修改。 log_write 通知当一个块在单个事务中被多次写入时，并在日志中为该块分配相同的槽。 这种优化通常称为吸收。 例如，包含多个文件的 inode 的磁盘块在一个事务中被多次写入是很常见的。 通过将多个磁盘写入合并为一个，文件系统可以节省日志空间并可以获得更好的性能，因为只需要将磁盘块的一个副本写入磁盘。
+
+end_op (kernel/log.c:147) 首先减少未完成的系统调用的计数。 如果计数现在为零，它会通过调用 commit() 来提交当前事务。 这个过程有四个阶段。 write_log() (kernel/log.c:179) 将事务中修改的每个块从缓冲区缓存复制到磁盘日志中的槽。 write_head() (kernel/log.c:103) 将头块写入磁盘：这是提交点，写入后崩溃将导致恢复从日志中重放事务的写入。 install_trans (kernel/log.c:69) 从日志中读取每个块并将其写入文件系统中的适当位置。 最后 end_op 写入计数为零的日志头； 这必须在下一个事务开始写入记录块之前发生，这样崩溃就不会导致使用一个事务的标头和后续事务的标头进行恢复记录块。
+
+recover_from_log (kernel/log.c:117) 从 initlog (kernel/log.c:55) 调用，它在第一个用户进程运行之前从 fsinit(kernel/fs.c:42) 调用 (kernel/proc .c:520）。 它读取日志标头，并在标头指示日志包含已提交的事务时模仿 end_op 的操作。
+
+日志的使用示例发生在文件写入 (kernel/file.c:135) 中。 交易看起来像这样：
+
+```c
+begin_op();
+ilock(f -> ip);
+r = writei(f -> ip, ...);
+iunlock(f -> ip);
+end_op();
+```
+
+此代码包含在一个循环中，该循环一次将大量写入分解为仅几个扇区的单个事务，以避免日志溢出。作为此事务的一部分，对 writei 的调用写入许多块：文件的索引节点、一个或多个位图块以及一些数据块。
+
+8.7 code : block allocator
+
+文件和目录内容存储在磁盘块中，磁盘块必须从空闲池中分配。 Xv6 的块分配器在磁盘上维护一个空闲位图，每个块一个位。 零位表示相应的块是免费的； 一位表示它正在使用中。 程序 mkfs 设置与引导扇区、超级块、日志块、inode 块和位图块对应的位。
+
+块分配器提供两个功能：balloc 分配一个新的磁盘块，bfree 释放一个块。 Balloc 在 (kernel/fs.c:71) 处的 balloc 循环考虑每个块，从块 0 开始直到 sb.size，文件系统中的块数。 它寻找位图位为零的块，表示它是空闲的。 如果 balloc 找到这样的块，它会更新位图并返回该块。 为了提高效率，循环被分成两部分。 外循环读取每个位图位块。 内部循环检查单个位图块中的所有每块位数 (BPB) 位。 如果两个进程试图同时分配一个块，则可能发生的竞争被缓冲区缓存一次只允许一个进程使用任何一个位图块这一事实所阻止。
+
+Bfree (kernel/fs.c:90) 找到正确的位图块并清除正确的位。 bread 和 brelse 隐含的独占使用再次避免了显式锁定的需要。
+与本章其余部分描述的大部分代码一样，balloc 和 bfree 必须在事务内部调用。
+
+8.8 inode layer
+
+术语 inode 可以具有两个相关含义之一。 它可能指的是包含文件大小和数据块编号列表的磁盘数据结构。 或者“inode”可能指的是内存中的 inode，它包含磁盘 inode 的副本以及内核所需的额外信息。
+
+磁盘上的 inode 被打包到称为 inode 块的连续磁盘区域中。 每个 inode 的大小都相同，因此给定一个数字 n 很容易找到磁盘上的第 n 个 inode。 事实上，这个数字 n，称为 inode 编号或 i-number，是在实现中识别 inode 的方式。
+磁盘 inode 由 struct dinode (kernel/fs.h:32) 定义。 类型字段区分文件、目录和特殊文件（设备）。 零类型表示磁盘上的 inode 是空闲的。 nlink 字段计算引用此 inode 的目录条目的数量，以便识别何时应释放磁盘上的 inode 及其数据块。 大小字段记录了文件中内容的字节数。 addrs数组记录了块号保存文件内容的磁盘块。
+内核将活动 inode 的集合保存在内存中一个名为 itable 的表中； struct inode (kernel/file.h:17) 是磁盘上 struct dinode 的内存副本。 仅当有 C 指针指向该 inode 时，内核才会将 inode 存储在内存中。 ref 字段计算引用内存中 inode 的 C 指针的数量，如果引用计数降为零，内核将从内存中丢弃 inode。 iget 和 iput 函数获取和释放指向 inode 的指针，修改引用计数。 指向 inode 的指针可以来自文件描述符、当前工作目录和临时内核代码（如 exec）。
+
+```c
+struct dinode {
+  short type;           // File type
+  short major;          // Major device number (T_DEVICE only)
+  short minor;          // Minor device number (T_DEVICE only)
+  short nlink;          // Number of links to inode in file system
+  uint size;            // Size of file (bytes)
+  uint addrs[NDIRECT+1];   // Data block addresses
+};
+```
+
+xv6 的 inode 代码中有四种锁或类锁机制。itable.lock 保护一个 inode 最多出现在 inode 表中一次的不变量，以及一个 inmemory inode 的 ref 字段计算指向 inode 的内存指针的数量的不变量。每个内存中的 inode 都有一个包含睡眠锁的锁定字段，它确保对 inode 的字段（例如文件长度）以及 inode 的文件或目录内容块的独占访问。 一个 inode 的 ref，如果它大于零，会导致系统在表中维护 inode，而不是为不同的 inode 重新使用表条目。 最后，每个 inode 包含一个 nlink 字段（在磁盘上，如果在内存中则复制到内存中），用于计算引用文件的目录条目的数量； 如果 inode 的链接数大于零，xv6 将不会释放它。
+iget() 返回的 struct inode 指针在对应的 iput() 调用之前保证有效； inode 不会被删除，指针指向的内存也不会被其他 inode 重新使用。 iget() 提供对一个 inode 的非独占访问，因此可以有多个指向同一个 inode 的指针。 文件系统代码的许多部分都依赖于 iget() 的这种行为，既可以保持对索引节点（如打开的文件和当前目录）的长期引用，又可以防止竞争，同时避免操作多个索引节点（例如路径名）的代码中出现死锁）。
+
+iget 返回的 struct inode 可能没有任何有用的内容。 为了确保它拥有磁盘 inode 的副本，代码必须调用 ilock。 这将锁定索引节点（以便其他进程无法锁定它）并从磁盘读取索引节点（如果尚未读取）。iunlock 释放 inode 上的锁。 将 inode 指针的获取与锁定分开有助于在某些情况下避免死锁，例如在目录查找期间。 多个进程可以持有一个指向 iget 返回的 inode 的 C 指针，但一次只有一个进程可以锁定 inode。
+
+```c
+// in-memory copy of an inode
+struct inode {
+  uint dev;           // Device number
+  uint inum;          // Inode number
+  int ref;            // Reference count
+  struct sleeplock lock; // protects everything below here
+  int valid;          // inode has been read from disk?
+
+  short type;         // copy of disk inode
+  short major;
+  short minor;
+  short nlink;
+  uint size;
+  uint addrs[NDIRECT+1];
+};
+```
+
+inode 表仅存储内核代码或数据结构持有 C 指针的 inode。 它的主要工作是同步多个进程的访问。 inode表也恰好缓存了常用的inode，但缓存是次要的； 如果一个 inode 被频繁使用，buffer cache 可能会将它保存在内存中。 修改内存中 inode 的代码使用 iupdate 将其写入磁盘。
+
+8.10 code: inode content
+
+磁盘上的 inode 结构 struct dinode 包含一个大小和一个块号数组（见图 8.3）。inode 数据位于 dinode 的地址数组中列出的块中。 第一个 NDIRECT 数据块列在数组的第一个 NDIRECT 条目中； 这些块称为直接块。 下一个 NINDIRECT 数据块不在 inode 中列出，而是在称为间接块的数据块中列出。 addrs 数组中的最后一项给出了间接块的地址。
+因此，文件的前 12 kB ( NDIRECT x BSIZE) 字节可以从 inode 中列出的块加载，而接下来的 256 kB ( NINDIRECT x BSIZE) 字节只能在查询间接块后加载。 这是一个很好的磁盘表示，但对客户端来说是一个复杂的表示。 函数 bmap 管理表示，以便更高级别的例程，例如我们将很快看到的 readi 和 writei，不需要管理这种复杂性。 Bmap 返回 inode ip 的第 bn 个数据块的磁盘块号。 如果 ip 还没有这样的块，bmap 会分配一个。
+
+<img src="G:\typora_image_store\image-20230109202729759.png" alt="image-20230109202729759" style="zoom:80%;" />
+
+函数 bmap (kernel/fs.c:378) 首先选择简单的情况：第一个 NDIRECT 块列在 inode 本身 (kernel/fs.c:383-387) 中。 接下来的 NINDIRECT 块列在 ip->addrs[NDIRECT] 的间接块中。 bmap 读取间接块 (kernel/fs.c:394)，然后从块内的正确位置读取块号 (kernel/fs.c:395)。 如果块号超过NDIRECT+NINDIRECT，bmap panic； writei 包含防止这种情况发生的检查 (kernel/fs.c:494)。
+
+bmap 根据需要分配块。 ip->addrs[] 或零间接条目表示没有分配块。 当 bmap 遇到零时，它会用新块的数量替换它们，按需分配 (kernel/fs.c:384-385) (kernel/fs.c:392-393)。
+
+```c
+// Return the disk block address of the nth block in inode ip.
+// If there is no such block, bmap allocates one.
+static uint
+bmap(struct inode *ip, uint bn)
+{
+  uint addr, *a;
+  struct buf *bp;
+
+  if(bn < NDIRECT){
+    if((addr = ip->addrs[bn]) == 0)
+      ip->addrs[bn] = addr = balloc(ip->dev);
+    return addr;
+  }
+  bn -= NDIRECT;
+
+  if(bn < NINDIRECT){
+    // Load indirect block, allocating if necessary.
+    if((addr = ip->addrs[NDIRECT]) == 0)
+      ip->addrs[NDIRECT] = addr = balloc(ip->dev);
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[bn]) == 0){
+      a[bn] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    brelse(bp);
+    return addr;
+  }
+
+  panic("bmap: out of range");
+}
+```
+
+itrunc 释放文件的块，将 inode 的大小重置为零。 Itrunc (kernel/fs.c:410) 首先释放直接块 (kernel/fs.c:416-421)，然后是间接块中列出的块 (kernel/fs.c:426-429)，最后 间接块本身 (kernel/fs.c:431-432)。
+
+bmap 使 readi 和 writei 可以很容易地获取 inode 的数据。 readi (kernel/fs.c:456) 首先确保偏移量和计数不超出文件末尾。 从文件末尾开始的读取返回错误 (kernel/fs.c:461-462)，而从文件末尾开始或越过文件末尾的读取返回的字节数少于请求的字节数 (kernel/fs.c:463-464) ). 主循环处理文件的每个块，将数据从缓冲区复制到 dst (kernel/fs.c:466-475)。 writei (kernel/fs.c:487) 与 readi 相同，但有三个例外：从文件末尾开始或越过文件末尾的写入会增大文件，直至达到最大文件大小 (kernel/fs.c:494-495) ; 循环将数据复制到缓冲区而不是 out (kernel/fs.c:36)； 如果写入扩展了文件，writei 必须更新它的大小。
+
+readi 和 writei 都从检查 ip->type == T_DEV 开始。 这种情况处理数据不在文件系统中的特殊设备； 我们将在文件描述符层中返回到这种情况。
+
+函数 stati (kernel/fs.c:442) 将 inode 元数据复制到 stat 结构中，该结构通过 stat 系统调用公开给用户程序。
+
+8.11 code : directory layer
+
+目录在内部实现很像文件。 它的 inode 类型为 T_DIR，它的数据是一系列目录条目。 每个条目都是一个 struct dirent (kernel/fs.h:56)，其中包含一个名称和一个 inode 编号。 名称最多为 DIRSIZ (14) 个字符； 如果更短，则以 NUL (0) 字节结束。 索引节点号为零的目录条目是免费的。
+
+函数 dirlookup (kernel/fs.c:530) 在目录中搜索具有给定名称的条目。
+如果它找到一个，它返回一个指向相应 inode 的指针，解锁，并将 *poff 设置为目录中条目的字节偏移量，以防调用者希望编辑它。 如果 dirlookup 找到具有正确名称的条目，它会更新 *poff 并返回通过 iget 获得的未锁定 inode。
+Dirlookup 是 iget 返回未锁定 inode 的原因。 调用者已锁定 dp，因此如果查找是针对当前目录的别名 .，则在返回之前尝试锁定 inode 将尝试重新锁定 dp 和死锁。 （还有更复杂的死锁场景，涉及多个进程和 ..，父目录的别名； . 不是唯一的问题。）调用者可以解锁 dp，然后锁定 ip，确保它一次只持有一个锁。
+
+函数 dirlink (kernel/fs.c:557) 将具有给定名称和 inode 编号的新目录条目写入目录 dp。 如果该名称已存在，dirlink 将返回错误 (kernel/fs.c:563-567)。 主循环读取目录条目以查找未分配的条目。 当它找到一个时，它会提前停止循环（kernel/fs.c:541-542），并将 off 设置为可用条目的偏移量。 否则，循环以 off 设置为 dp->size 结束。 无论哪种方式，dirlink 然后通过在偏移量处写入 (kernel/fs.c:577-580) 来向目录添加一个新条目。
+
+8.12 code: path names
+
+路径名称查找涉及对 dirlookup 的一系列调用，每个路径组件调用一次。
+Namei (kernel/fs.c:664) 评估路径并返回相应的 inode。 函数 nameiparent 是一个变体：它在最后一个元素之前停止，返回父目录的 inode 并将最后一个元素复制到 name 中。 两者都调用广义函数 namex 来完成实际工作。
+
+Namex (kernel/fs.c:629) 首先决定路径评估从哪里开始。 如果路径以斜杠开头，则计算从根开始； 否则，从当前目录开始计算 (kernel/fs.c:633-636)。
+然后它使用 skipelem 依次考虑路径的每个元素 (kernel/fs.c:638)。 循环的每次迭代都必须在当前 inode ip 中查找名称。 迭代从锁定 ip 并检查它是否是一个目录开始。 如果不是，则查找失败 (kernel/fs.c:639-643)。 （锁定 ip 是必要的，不是因为 ip->type 可以在脚下改变——它不能——而是因为在 ilock 运行之前，不能保证 ip->type 已经从磁盘加载。）如果调用是 nameiparent 并且这是 最后一个路径元素，循环提前停止，按照 nameiparent 的定义； 最终的路径元素已经被复制到 name 中，所以 namex 只需要返回解锁的 ip (kernel/fs.c:644-648)。
+最后，循环使用 dirlookup 查找路径元素，并通过设置 ip = next (kernel/fs.c:649-654) 为下一次迭代做准备。 当循环用完路径元素时，它返回 ip。
+
+过程 namex 可能需要很长时间才能完成：它可能涉及多个磁盘操作来读取路径名中遍历的目录的 inode 和目录块（如果它们不在缓冲区缓存中）。 Xv6 经过精心设计，因此如果一个内核线程对 namex 的调用在磁盘 I/O 上被阻塞，则另一个内核线程查找不同的路径名可以并发进行。 Namex 分别锁定路径中的每个目录，以便可以并行进行不同目录中的查找。
+
+这种并发性带来了一些挑战。 例如，当一个内核线程正在查找路径名时，另一个内核线程可能正在通过取消链接目录来更改目录树。
+一个潜在的风险是查找可能正在搜索已被另一个内核线程删除的目录，并且其块已被重新用于另一个目录或文件。
+xv6 避免了这样的竞争。 例如，在 namex 中执行 dirlookup 时，查找线程持有目录锁，dirlookup 返回一个使用 iget 获得的 inode。
+iget 增加 inode 的引用计数。 只有从 dirlookup 接收到 inode 后，namex 才会释放对目录的锁定。 现在另一个线程可能会取消索引节点与目录的链接，但 xv6 不会删除索引节点，因为索引节点的引用计数仍然大于零。
+另一个风险是死锁。 例如next在查找“.”时指向与ip相同的inode。 在释放对 ip 的锁定之前锁定 next 将导致死锁。 为避免此死锁，namex 在获取下一个锁之前解锁目录。 在这里我们再次看到为什么 iget 和 ilock 之间的分离很重要。
+
+8.13 file descriptor layer
+
+Unix 界面的一个很酷的方面是 Unix 中的大多数资源都表示为文件，包括控制台、管道等设备，当然还有真实的文件。 文件描述符层是实现这种一致性的层。
+正如我们在第 1 章中看到的，xv6 为每个进程提供了自己的打开文件表或文件描述符。
+每个打开的文件都由一个结构文件 (kernel/file.h:1) 表示，它是一个 inode 或管道的包装器，加上一个 I/O 偏移量。 每次调用 open 都会创建一个新的打开文件（一个新的结构文件）：如果多个进程独立打开同一个文件，不同的实例将具有不同的 I/O 偏移量。 另一方面，一个打开的文件（同一个文件结构）可以在一个进程的文件表中出现多次，也可以在多个进程的文件表中出现。 如果一个进程使用 open 打开文件，然后使用 dup 创建别名或使用 fork 与子进程共享，就会发生这种情况。 引用计数跟踪对特定打开文件的引用数。 文件可以打开以供读取或写入或两者兼而有之。 可读和可写字段跟踪这一点。
+
+系统中所有打开的文件都保存在一个全局文件表 ftable 中。 文件表有分配文件（filealloc）、创建重复引用（filedup）、释放引用（fileclose）、读写数据（fileread和filewrite）等函数。
+前三个遵循现在熟悉的形式。 Filealloc (kernel/file.c:30) 扫描文件表寻找一个未被引用的文件（f->ref == 0）并返回一个新的引用； filedup (kernel/file.c:48) 增加引用计数； 和 fileclose (kernel/file.c:60) 递减它。 当文件的引用计数达到零时，fileclose 根据类型释放底层管道或 inode。
+函数filestat、fileread和filewrite实现了对文件的stat、read和write操作。 Filestat (kernel/file.c:88) 只允许在 inode 上调用 stati。 Fileread 和 filewrite 检查打开模式是否允许该操作，然后将调用传递给管道或 inode 实现。 如果文件表示一个 inode，fileread 和 filewrite 使用 I/O 偏移量作为操作的偏移量，然后将其推进 (kernel/file.c:122-123) (kernel/file.c:153-154)。 管道没有偏移的概念。 回想一下，inode 函数要求调用者处理锁定 (kernel/file.c:94-96) (kernel/file.c:121-124) (kernel/file.c:163-166)。 inode 锁定有一个方便的副作用，即读写偏移量是自动更新的，因此同时对同一文件的多次写入不会覆盖彼此的数据，尽管它们的写入可能会交错结束。
+
+8.14 code : sytem calls
+
+使用较低层提供的功能，大多数系统调用的实现都是微不足道的（参见（kernel/sysfile.c））。 有一些call值得仔细研究。
+函数 sys_link 和 sys_unlink 编辑目录，创建或删除对 inode 的引用。 它们是使用事务的强大功能的另一个很好的例子。 Sys_link (kernel/sysfile.c:120) 首先获取它的参数，两个字符串旧的和新的 (kernel/sysfile.c:125)。 假设 old 存在并且不是目录 (kernel/sysfile.c:129-132)，sys_link 增加其 ip->nlink 计数。 然后 sys_link 调用 nameiparent 找到 new (kernel/sysfile.c:145) 的父目录和最终路径元素，并创建一个指向 old 的 inode (kernel/sysfile.c:148) 的新目录条目。 新的父目录必须存在并且与现有 inode 位于同一设备上：inode 编号仅在单个磁盘上具有唯一含义。 如果出现这样的错误，sys_link 必须返回并递减 ip->nlink。
+事务简化了实现，因为它需要更新多个磁盘块，但我们不必担心执行它们的顺序。 他们要么全部成功，要么全无。 例如，在没有事务的情况下，在创建链接之前更新 ip->nlink 会使文件系统暂时处于不安全状态，其间的崩溃可能会导致严重破坏。 有了交易，我们就不必担心这个了。
+
+Sys_link 为现有 inode 创建一个新名称。 函数 create (kernel/sysfile.c:242) 为新 inode 创建一个新名称。 它是三个文件创建系统调用的概括：用 O_CREATE 标志打开创建一个新的普通文件，mkdir 创建一个新目录，mkdev 创建一个新的设备文件。 和sys_link一样，create开始时调用nameiparent获取父目录的inode。 然后它调用 dirlookup 来检查名称是否已经存在 (kernel/sysfile.c:252)。 如果名称确实存在，则 create 的行为取决于它被用于哪个系统调用：open 与 mkdir 和 mkdev 具有不同的语义。 如果 create 代表 open (type == T_FILE) 使用并且存在的名称本身就是一个常规文件，则 open 将其视为成功，因此 create 也是如此 (kernel/sysfile.c:256)。 否则，它是一个错误 (kernel/sysfile.c:257-258)。 如果该名称尚不存在，则 create 现在会使用 ialloc (kernel/sysfile.c:261) 分配一个新的 inode。 如果新 inode 是一个目录，create 会用 . 和 .. 条目。 最后，现在数据已正确初始化，create 可以将其链接到父目录 (kernel/sysfile.c:274)。 create和sys_link一样，同时持有两个inode锁：ip和dp。 没有死锁的可能，因为 inode ip 是新分配的：系统中没有其他进程会持有 ip 的锁然后尝试锁定 dp。
+
+使用create，很容易实现sys_open、sys_mkdir、sys_mknod。 sys_open (kernel/sysfile.c:287) 是最复杂的，因为创建一个新文件只是它能做的一小部分。 如果 open 传递了 O_CREATE 标志，它会调用 create (kernel/sysfile.c:301)。 否则，它调用 namei (kernel/sysfile.c:307)。 Create 返回一个锁定的 inode，但 namei 没有，所以 sys_open必须锁定 inode 本身。 这提供了一个方便的地方来检查目录是否只打开用于读取，而不是用于写入。 假设 inode 是通过某种方式获得的，sys_open 分配一个文件和一个文件描述符 (kernel/sysfile.c:325)，然后填充文件 (kernel/sysfile.c:337-342)。 请注意，没有其他进程可以访问部分初始化的文件，因为它仅在当前进程的表中。
+第 7 章检查了在我们甚至拥有文件系统之前管道的实现。 函数 sys_pipe 通过提供一种创建管道对的方法将该实现连接到文件系统。它的参数是一个指向两个整数空间的指针，它将记录两个新的文件描述符。然后它分配管道并安装文件描述符。
+
+8.15 real world
+
+实际操作系统中的缓冲区缓存比 xv6 的复杂得多，但它有两个相同的目的：缓存和同步对磁盘的访问。 Xv6 的缓冲区缓存，与 V6 一样，使用简单的最近最少使用 (LRU) 驱逐策略； 可以实施许多更复杂的策略，每个策略都适合某些工作负载，但对其他工作负载则不利。 更高效的 LRU 缓存将消除链表，而不是使用哈希表进行查找，使用堆进行 LRU 驱逐。 现代缓冲区高速缓存通常与虚拟内存系统集成以支持内存映射文件。
+Xv6 的日志系统效率低下。 提交不能与文件系统系统调用同时发生。 系统记录整个块，即使块中只有几个字节被更改。 它执行同步日志写入，一次一个块，每个块可能需要整个磁盘旋转时间。 真正的日志记录系统解决了所有这些问题。
+
+日志记录不是提供崩溃恢复的唯一方法。 早期的文件系统在重新引导期间使用清除程序（例如，UNIX fsck 程序）来检查每个文件和目录以及块和 inode 空闲列表，查找并解决不一致。 对于大型文件系统，清理可能需要数小时，并且在某些情况下无法以导致原始系统调用成为原子的方式解决不一致。 从日志中恢复要快得多，并导致系统调用在崩溃时是原子的。
+xv6 使用与早期 UNIX 相同的 inode 和目录的基本磁盘布局； 多年来，这一计划一直非常顽固。 BSD 的 UFS/FFS 和 Linux 的 ext2/ext3 使用本质上相同的数据结构。 文件系统布局中效率最低的部分是目录，它需要在每次查找期间对所有磁盘块进行线性扫描。 当目录只有几个磁盘块时，这是合理的，但对于包含许多文件的目录来说，这是昂贵的。 Microsoft Windows 的 NTFS、macOS 的 HFS 和 Solaris 的 ZFS（仅举几例）将目录实现为磁盘上的块平衡树。 这很复杂但保证对数时间目录查找。
+
+xv6 对磁盘故障很天真：如果磁盘操作失败，xv6 会崩溃。 这是否合理取决于硬件：如果操作系统位于使用冗余来屏蔽磁盘故障的特殊硬件之上，操作系统可能很少看到故障，因此恐慌是可以接受的。 另一方面，使用普通磁盘的操作系统应该预见到故障并更优雅地处理它们，这样一个文件中的块丢失不会影响文件系统其余部分的使用。
+xv6 要求文件系统适合一个磁盘设备并且大小不变。 随着大型数据库和多媒体文件对存储的要求越来越高，操作系统正在开发消除“每个文件系统一个磁盘”瓶颈的方法。 基本方法是将许多磁盘组合成一个逻辑磁盘。 RAID 等硬件解决方案仍然是最受欢迎的，但当前的趋势是尽可能多地在软件中实现这种逻辑。 这些软件实现通常允许丰富的功能，例如通过动态添加或删除磁盘来增加或缩小逻辑设备。 当然，一个存储层可以
+动态增长或收缩需要一个可以执行相同操作的文件系统：xv6 使用的固定大小的 inode 块数组在此类环境中无法正常工作。 将磁盘管理与文件系统分开可能是最干净的设计，但两者之间复杂的接口导致一些系统（如 Sun 的 ZFS）将它们结合起来。
+xv6 的文件系统缺少现代文件系统的许多其他特性； 例如，它不支持快照和增量备份。
+现代 Unix 系统允许使用与磁盘存储相同的系统调用来访问多种资源：命名管道、网络连接、远程访问的网络文件系统以及监视和控制接口，例如 /proc。 与 xv6 的文件读取和文件写入中的 if 语句不同，这些系统通常为每个打开的文件提供一个函数指针表，每个操作一个，并调用函数指针来调用该 inode 的调用实现。 网络
+文件系统和用户级文件系统提供将这些调用转换为网络 RPC 并在返回之前等待响应的功能。
+
+9 concurrency revisited
+
+同时获得良好的并行性能、并发时的正确性和可理解的代码是内核设计中的一大挑战。 直接使用锁是实现正确性的最佳途径，但并非总是可行。 本章重点介绍 xv6 被迫以复杂方式使用锁的示例，以及 xv6 使用类锁技术但不使用锁的示例。
+
+9.1 locking patterns
+
+缓存的项目通常很难锁定。 例如，文件系统的块缓存 (kernel/bio.c:26) 存储多达 NBUF 磁盘块的副本。 给定的磁盘块在缓存中最多有一个副本是至关重要的； 否则，不同的进程可能会对本应属于同一块的不同副本进行相互冲突的更改。 每个缓存块都存储在一个 struct buf (kernel/buf.h:1) 中。
+一个 struct buf 有一个锁定字段，它有助于确保一次只有一个进程使用给定的磁盘块。 然而，那个锁还不够：如果一个块根本不存在于缓存中，并且两个进程想要同时使用它怎么办？ 没有 struct buf（因为块还没有被缓存），因此没有什么可以锁定的。 Xv6 通过将附加锁 (bcache.lock) 与缓存块的标识集相关联来处理这种情况。 需要检查的代码如果一个块被缓存（例如，bget (kernel/bio.c:59)），或者改变缓存块的集合，必须持有 bcache.lock； 在该代码找到它需要的块和 struct buf 之后，它可以释放 bcache.lock 并只锁定特定的块。 这是一个常见的模式：一个锁用于一组物品，每件物品加一把锁。
+
+通常获取锁的同一个函数会释放它。 但更精确的看待事物的方式是，在必须表现为原子的序列开始时获取锁，并在该序列结束时释放。 如果序列在不同的函数、不同的线程或不同的 CPU 中开始和结束，那么锁的获取和释放必须做同样的事情。 锁的作用是强制其他使用等待，而不是将一条数据钉在某个特定的代理上。 一个例子是 yield (kernel/proc.c:496) 中的 acquire，它是在调度程序线程中释放的，而不是在获取过程中释放的。 再比如ilock中的acquiresleep(kernel/fs.c:289)； 此代码经常在读取磁盘时休眠； 它可能会在不同的 CPU 上唤醒，这意味着可能会在不同的 CPU 上获取和释放锁。
+
+释放受对象中嵌入的锁保护的对象是一项微妙的工作，因为拥有锁不足以保证释放是正确的。当其他线程正在等待获取使用该对象时，就会出现问题； 释放对象会隐式释放嵌入的锁，这将导致等待线程发生故障。 一种解决方案是跟踪存在多少对对象的引用，以便仅在最后一个引用消失时才释放它。 有关示例，请参见 pipeclose (kernel/pipe.c:59)； pi->readopen 和 pi->writeopen 跟踪管道是否有引用它的文件描述符。
+
+9.2 lock-like patterns
+
+在许多地方，xv6 以类似锁的方式使用引用计数或标志来指示对象已分配且不应被释放或重新使用。 进程的 p->state 以这种方式运行，文件、inode 和 buf 结构中的引用计数也是如此。 虽然在每种情况下锁都会保护标志或引用计数，但后者可以防止对象被过早释放。
+
+文件系统使用struct inode reference counts作为一种可以被多个进程持有的共享锁，以避免代码使用普通锁时出现的死锁。
+例如，namex (kernel/fs.c:629) 中的循环依次锁定每个路径名组件命名的目录。 但是，namex 必须在循环结束时释放每个锁，因为如果它持有多个锁，如果路径名包含一个点（例如，a/./b），它可能会与自身发生死锁。
+
+它还可能会因涉及目录的并发查找而死锁…… 正如第 8 章所解释的，解决方案是循环将目录 inode 带到下一次迭代，其引用计数递增，但不锁定。
+
+一些数据项在不同时间受到不同机制的保护，有时可能会通过 xv6 代码的结构隐式地保护免受并发访问，而不是通过显式的
+锁。 例如，当物理页面空闲时，它受 kmem.lock (kernel/kalloc.c:24) 保护。
+如果页面随后被分配为管道 (kernel/pipe.c:23)，它会受到不同锁（嵌入式 pi->lock）的保护。 如果为新进程的用户内存重新分配页面，则它根本不受锁保护。 相反，分配器不会将该页面提供给任何其他进程（直到它被释放）这一事实保护它免受并发访问。 新进程内存的所有权很复杂：
+首先，父进程在 fork 中分配和操作它，然后子进程使用它，并且（在子进程退出后）父进程再次拥有内存并将其传递给 kfree。 这里有两个教训：一个数据对象可以在其生命周期的不同时间点以不同的方式受到并发保护，并且保护可以采用隐式结构的形式而不是显式锁。
+最后一个类似锁的例子是需要在调用 mycpu() (kernel/proc.c:80) 时禁用中断。 禁用中断会导致调用代码相对于可能强制上下文切换的计时器中断是原子的，从而将进程移动到不同的 CPU。
+
+9.3 no locks at all
+
+有几个地方 xv6 共享可变数据而根本没有锁。 一个是自旋锁的实现，尽管可以将 RISC-V 原子指令视为依赖于在硬件中实现的锁。 另一个是main.c（kernel/main.c:7）中的started变量，用来防止其他CPU运行，直到CPU零完成对xv6的初始化； volatile 确保编译器实际生成加载和存储指令。 第三个例子是 p->killed，它在持有 p->lock (kernel/proc.c:579) 时设置，但在没有持有锁的情况下进行检查 (kernel/trap.c:56)。
+xv6 包含一个 CPU 或线程写入一些数据，另一个 CPU 或线程读取数据的情况，但没有专用于保护该数据的特定锁。 例如，在 fork 中，父进程写入子进程的用户内存页面，而子进程（不同的线程，可能在不同的 CPU 上）读取这些页面； 没有锁明确保护这些页面。 这不是严格意义上的锁定问题，因为子进程直到父进程完成写入后才开始执行。 这是一个潜在的内存排序问题（见第 6 章），因为没有内存屏障就没有理由期望一个 CPU 看到另一个 CPU 的写入。 然而，由于父进程释放锁，而子进程在启动时获取锁，获取和释放中的内存屏障确保子进程的 CPU 可以看到父进程的写入。
+
+9.4 parallelism
+
+锁定主要是为了正确性而抑制并行性。 因为性能也很重要，所以内核设计者经常不得不考虑如何以既实现正确性又允许并行性的方式使用锁。 虽然 xv6 并不是为高性能而系统地设计的，但仍然值得考虑哪些 xv6 操作可以并行执行，哪些可能会在锁上发生冲突。
+xv6 中的管道是相当好的并行性的一个例子。 每个管道都有自己的锁，这样不同的进程就可以在不同的CPU上并行读写不同的管道。 但是，对于给定的管道，写入者和读取者必须等待对方释放锁； 他们不能同时读/写同一个管道。 从空管道读取（或写入满管道）也必须阻塞，但这不是由于锁定方案。
+上下文切换是一个更复杂的例子。 两个内核线程，各自在自己的 CPU 上执行，可以同时调用 yield、sched 和 swtch，这些调用将并行执行。
+线程各自持有一个锁，但它们是不同的锁，因此它们不必相互等待。
+然而，一旦进入调度程序，两个 CPU 在搜索进程表以寻找可运行的进程时可能会在锁上发生冲突。 也就是说，xv6 可能会在上下文切换期间从多个 CPU 中获得性能优势，但可能不会达到它所能达到的程度。
+
+另一个例子是从不同 CPU 上的不同进程并发调用 fork。 这些调用可能必须相互等待 pid_lock 和 kmem.lock，以及在进程表中搜索 UNUSED 进程所需的每个进程锁。 另一方面，这两个分叉进程可以完全并行地复制用户内存页和格式化页表页。
+在某些情况下，上述每个示例中的锁定方案都会牺牲并行性能。 在每种情况下，都可以使用更精细的设计来获得更多的并行性。 是否值得取决于细节：相关操作被调用的频率、代码花费多长时间持有竞争锁、有多少 CPU 可能同时运行冲突操作、代码的其他部分是否是更具限制性的瓶颈。 很难猜测给定的锁定方案是否会导致性能问题，或者新设计是否明显更好，因此通常需要对实际工作负载进行测量。
